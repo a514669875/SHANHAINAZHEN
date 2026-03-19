@@ -1,0 +1,33 @@
+/* UI.md design tokens */
+:root {
+  --color-primary: #1E3A8A;
+  --color-secondary: #3B82F6;
+  --color-bg: #F3F4F6;
+  --color-text: #1F2937;
+  --color-text-secondary: #6B7280;
+  --color-success: #10B981;
+  --color-warning: #F59E0B;
+  --color-error: #EF4444;
+  --page-padding: 24px;
+  --module-gap: 16px;
+  --base-font-size: 14px; /* V2-9: 全局字体增大一号 13px→14px */
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: "Microsoft YaHei", "微软雅黑", sans-serif;
+  font-size: var(--base-font-size);
+  color: var(--color-text);
+  background-color: var(--color-bg);
+}
+
+/* V2-9: 表格行高 44-48px（原 40px） */
+.el-table .el-table__body tr td {
+  padding: 12px 0;
+  line-height: 1.5;
+}
