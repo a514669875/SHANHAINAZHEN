@@ -39,6 +39,40 @@ from app.events_schema import EventType
 router = APIRouter(prefix="/api/files", tags=["files"])
 
 
+def _contract_file_for_ledger(f: File) -> bool:
+    """合同文件：布尔字段或历史数据里 file_type 标记。"""
+    if getattr(f, "is_contract", False):
+        return True
+    return (getattr(f, "file_type", None) or "") == "合同文件"
+
+
+def _can_read_file_content(db: Session, current_user: User, f: File) -> bool:
+    """归档/合同文件读取权限：管理员；项目经办人；采购管理员且为智能台账关联的合同（含五选二另一标段、pdf_preview_path 指向）。"""
+    if current_user.role == "系统管理员":
+        return True
+    proc = db.query(Procurement).filter(Procurement.id == f.procurement_id).first()
+    if not proc:
+        return False
+    project = db.query(Project).filter(Project.id == proc.project_id).first()
+    if not project:
+        return False
+    if is_officer(project, current_user.id):
+        return True
+    if current_user.role == "采购管理员" and _contract_file_for_ledger(f):
+        proc_ids = [f.procurement_id]
+        if proc.procurement_method == "五选二":
+            sibling = find_dual_sibling(db, proc)
+            if sibling:
+                proc_ids = [proc.id, sibling.id]
+        if db.query(Ledger).filter(Ledger.procurement_id.in_(proc_ids)).first():
+            return True
+        # 台账行与文件可能分属五选二两标段时，归档写入的 pdf_preview_path 仍指向该 file id
+        needle = f"/api/files/{f.id}/content"
+        if db.query(Ledger).filter(Ledger.pdf_preview_path.isnot(None), Ledger.pdf_preview_path.contains(needle)).first():
+            return True
+    return False
+
+
 @router.get("")
 def list_files(
     procurement_id: int,
@@ -484,6 +518,12 @@ def get_file_content(
     f = db.query(File).filter(File.id == file_id).first()
     if not f:
         raise HTTPException(status_code=404, detail="文件不存在")
+    if not _can_read_file_content(db, current_user, f):
+        raise HTTPException(status_code=403, detail="无权限查看该文件")
+    local_path = ARCHIVED_FILE_ROOT / f.file_path
+    # 单机/本机开发：文件实际在后端归档目录，但库中仍带 storage_computer_ip，优先读本地避免 8001 路径不一致导致 404→500
+    if local_path.is_file():
+        return FileResponse(local_path, filename=f.file_name)
     if f.storage_computer_ip:
         owner = db.query(User).filter(User.id == f.owner_user_id).first()
         port = owner.file_service_port if owner and owner.file_service_port else 8001
@@ -494,10 +534,7 @@ def get_file_content(
             f.file_name,
         )
         return StreamingResponse(resp.iter_content(8192), media_type="application/octet-stream")
-    local_path = ARCHIVED_FILE_ROOT / f.file_path
-    if not local_path.exists():
-        raise HTTPException(status_code=404, detail="文件不存在")
-    return FileResponse(local_path, filename=f.file_name)
+    raise HTTPException(status_code=404, detail="文件不存在")
 
 
 def _parse_form_bool(v) -> bool:

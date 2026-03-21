@@ -22,15 +22,18 @@
           />
         </el-select>
       </el-form-item>
-      <el-input
-        v-model="searchKeyword"
-        placeholder="采购项目名称/合同编号/供应商"
-        class="search-input"
-        clearable
-        @keyup.enter="loadProcurements"
-      >
-        <template #prefix><el-icon><Search /></el-icon></template>
-      </el-input>
+      <div class="header-search-col">
+        <el-input
+          v-model="searchKeyword"
+          placeholder="搜索项目名称/合同编号/供应商"
+          class="search-input"
+          clearable
+          @keyup.enter="loadProcurements"
+        >
+          <template #prefix><el-icon><Search /></el-icon></template>
+        </el-input>
+        <div v-if="selectedProjectId" class="table-total-above-grid">共 {{ upperTotal }} 条</div>
+      </div>
     </div>
     <div class="action-bar">
       <el-button type="primary" :disabled="!selectedProjectId" @click="showAddProcurement">新增采购</el-button>
@@ -43,7 +46,7 @@
       <div class="table-scroll-wrapper">
         <el-table
           ref="tableRef"
-          :data="upperPagedList"
+          :data="filteredProcurements"
           row-key="id"
           border
           :max-height="upperHeight - 80"
@@ -56,6 +59,7 @@
           <el-table-column prop="project_id_display" label="工程编号" width="120" resizable>
             <template #default>{{ project?.project_id || '-' }}</template>
           </el-table-column>
+          <el-table-column prop="procurement_type" label="采购类型" width="100" resizable />
           <el-table-column prop="procurement_method" label="采购方式" width="100" resizable />
           <el-table-column prop="project_name" label="采购项目名称" min-width="100" width="140" resizable />
           <el-table-column prop="content" label="采购内容" width="100" resizable />
@@ -79,23 +83,6 @@
             </template>
           </el-table-column>
         </el-table>
-      </div>
-      <div class="pagination">
-        <span>共 {{ upperTotal }} 条记录</span>
-        <span class="ml">第 {{ upperPage }}/{{ Math.max(1, Math.ceil(upperTotal / upperPageSize)) }} 页</span>
-        <el-pagination
-          v-model:current-page="upperPage"
-          v-model:page-size="upperPageSize"
-          :page-sizes="[10, 20, 50]"
-          :total="upperTotal"
-          layout="prev, pager, next"
-          small
-          class="pagination-controls"
-        />
-        <span class="ml">跳转至</span>
-        <el-input v-model.number="upperPageJump" type="number" size="small" class="page-jump-input" @keyup.enter="jumpUpperPage" />
-        <span>页</span>
-        <el-button size="small" @click="jumpUpperPage">GO</el-button>
       </div>
     </div>
 
@@ -174,7 +161,7 @@
             </template>
             <span v-else class="tip-text">请在上方表格选择采购项目</span>
           </div>
-          <el-table :data="archivePagedList" size="small" row-key="id" @selection-change="handleArchiveFileSelectionChange">
+          <el-table :data="archiveFiles" size="small" row-key="id" @selection-change="handleArchiveFileSelectionChange">
             <el-table-column type="selection" width="50" />
             <el-table-column prop="file_name" label="文件名" min-width="120" />
             <el-table-column label="上传时间" width="110">
@@ -193,14 +180,6 @@
           </el-table>
           <div class="file-pagination">
             <span>共 {{ archiveFiles.length }} 条记录</span>
-            <span class="ml">第 {{ archiveFilePage }}/{{ archiveFileTotalPages }} 页</span>
-            <el-pagination
-              v-model:current-page="archiveFilePage"
-              :page-size="archiveFilePageSize"
-              :total="archiveFiles.length"
-              layout="prev, pager, next"
-              small
-            />
           </div>
         </el-tab-pane>
       </el-tabs>
@@ -219,6 +198,7 @@
             <el-form-item label="采购类型">
               <el-select v-model="form.step1.procurement_type" style="width: 100%" :disabled="!!editingProcurementId">
                 <el-option label="材料采购" value="材料采购" />
+                <el-option label="材料租赁" value="材料租赁" />
                 <el-option label="设备采购" value="设备采购" />
                 <el-option label="机械租赁" value="机械租赁" />
               </el-select>
@@ -265,7 +245,7 @@
         <div v-show="currentStep === 1">
           <el-form v-if="form.step1.procurement_method === '补充协议'" :model="form" label-width="180px">
             <el-form-item label="工程名称">
-              <el-input :model-value="form.step2.project_name" disabled />
+              <el-input :model-value="project?.project_name || form.step2.project_name" disabled />
             </el-form-item>
             <el-form-item label="工程编号">
               <el-input :model-value="form.step2.project_id" disabled />
@@ -275,6 +255,9 @@
             </el-form-item>
             <el-form-item label="原合同价（元）">
               <el-input :model-value="parentContractInfo?.original_price?.toLocaleString()" disabled />
+            </el-form-item>
+            <el-form-item label="采购项目名称">
+              <el-input v-model="form.supplement_procurement_project_name" placeholder="默认与主合同采购项目名称一致，可修改" />
             </el-form-item>
             <el-form-item label="控制价（元）">
               <NumericInput v-model="form.supplement_control_price" style="width: 100%" />
@@ -323,6 +306,16 @@
             <el-form-item label="发包单位">
               <el-input v-model="form.step2.construction_unit" disabled>
                 <template #append><el-button @click="copyToClipboard(form.step2.construction_unit)">复制</el-button></template>
+              </el-input>
+            </el-form-item>
+            <el-form-item label="发包方联系人">
+              <el-input v-model="form.step2.construction_contact_person" disabled>
+                <template #append><el-button @click="copyToClipboard(form.step2.construction_contact_person || '')">复制</el-button></template>
+              </el-input>
+            </el-form-item>
+            <el-form-item label="发包方联系方式">
+              <el-input v-model="form.step2.construction_contact_phone" disabled>
+                <template #append><el-button @click="copyToClipboard(form.step2.construction_contact_phone || '')">复制</el-button></template>
               </el-input>
             </el-form-item>
             <el-form-item label="总包合同价">
@@ -458,10 +451,10 @@
         </div>
         <div v-show="currentStep === 2">
           <div v-if="form.step1.procurement_method === '补充协议'" class="supplement-note">
-            补充协议供应商与主合同一致，无需填写。
+            以下为与主合同中标供应商一致的信息（名称、联系人、联系方式可改）。<strong>含税报价（元）</strong>即第 1 步填写的<strong>新增金额</strong>，与主合同含税报价无关，不可在此修改。经营范围、税率与主合同一致，不可改。
           </div>
-          <el-button v-else type="primary" size="small" :disabled="!canAddSupplier" @click="addSupplier">添加供应商</el-button>
-          <el-table :data="form.step1.procurement_method === '补充协议' ? [] : form.suppliers" style="margin-top: 12px">
+          <el-button v-if="form.step1.procurement_method !== '补充协议'" type="primary" size="small" :disabled="!canAddSupplier" @click="addSupplier">添加供应商</el-button>
+          <el-table :data="form.suppliers" style="margin-top: 12px">
             <el-table-column type="index" label="序号" width="60" />
             <el-table-column label="供应商" width="140">
               <template #default="{ row }">
@@ -480,17 +473,35 @@
             </el-table-column>
             <el-table-column label="经营范围" min-width="120">
               <template #default="{ row }">
-                <el-input v-model="row.business_scope" placeholder="经营范围" size="small" />
+                <el-input
+                  v-if="form.step1.procurement_method !== '补充协议'"
+                  v-model="row.business_scope"
+                  placeholder="经营范围"
+                  size="small"
+                />
+                <span v-else class="cell-readonly">{{ row.business_scope || '—' }}</span>
               </template>
             </el-table-column>
             <el-table-column label="税率" width="80">
               <template #default="{ row }">
-                <el-input v-model="row.tax_rate" placeholder="如13%" size="small" />
+                <el-input
+                  v-if="form.step1.procurement_method !== '补充协议'"
+                  v-model="row.tax_rate"
+                  placeholder="如13%"
+                  size="small"
+                />
+                <span v-else class="cell-readonly">{{ row.tax_rate || '—' }}</span>
               </template>
             </el-table-column>
             <el-table-column label="含税报价（元）" width="140">
               <template #default="{ row }">
-                <NumericInput v-model="row.quoted_price" size="small" style="width: 100%" />
+                <NumericInput
+                  v-if="form.step1.procurement_method !== '补充协议'"
+                  v-model="row.quoted_price"
+                  size="small"
+                  style="width: 100%"
+                />
+                <span v-else class="cell-readonly">{{ formatSupplementQuotedDisplay(row.quoted_price) }}</span>
               </template>
             </el-table-column>
             <el-table-column label="操作" width="80" fixed="right">
@@ -562,6 +573,8 @@
           <el-descriptions-item label="工程编号">{{ overviewData.project_number }}</el-descriptions-item>
           <el-descriptions-item label="工程ID">{{ overviewData.project_id_display }}</el-descriptions-item>
           <el-descriptions-item label="发包单位">{{ overviewData.construction_unit }}</el-descriptions-item>
+          <el-descriptions-item label="发包方联系人">{{ overviewData.construction_contact_person || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="发包方联系方式">{{ overviewData.construction_contact_phone || '-' }}</el-descriptions-item>
           <el-descriptions-item label="合同总价">{{ overviewData.total_contract_price?.toLocaleString() }} 元</el-descriptions-item>
           <el-descriptions-item label="工程地址">{{ overviewData.project_address }}</el-descriptions-item>
           <el-descriptions-item label="项目部">{{ overviewData.department }}</el-descriptions-item>
@@ -577,7 +590,7 @@
           <el-descriptions-item label="采购项目名称">{{ overviewData.procurement_project_name }}</el-descriptions-item>
           <el-descriptions-item label="签订日期">{{ formatDateYMD(overviewData.sign_date) }}</el-descriptions-item>
           <el-descriptions-item label="采购内容" :span="2">{{ overviewData.content }}</el-descriptions-item>
-          <el-descriptions-item label="控制价">{{ overviewData.control_price?.toLocaleString() }} 元</el-descriptions-item>
+          <el-descriptions-item label="控制价">{{ overviewControlPriceLabel }}</el-descriptions-item>
           <template v-if="overviewData.procurement_method === '五选二' && overviewData.step2">
             <el-descriptions-item label="一标段名称">{{ overviewData.step2.biaoduanming1 || '-' }}</el-descriptions-item>
             <el-descriptions-item label="二标段名称">{{ overviewData.step2.biaoduanming2 || '-' }}</el-descriptions-item>
@@ -593,7 +606,9 @@
           <el-table-column prop="contact_person" label="联系人" width="80" />
           <el-table-column prop="contact_phone" label="联系方式" width="110" />
           <el-table-column prop="quoted_price" label="含税报价" width="110">
-            <template #default="{ row }">{{ row.quoted_price != null ? row.quoted_price?.toLocaleString() + ' 元' : '-' }}</template>
+            <template #default="{ row }">
+              {{ row.quoted_price == null || row.quoted_price === '' ? '-' : `${formatContractPrice(row.quoted_price)} 元` }}
+            </template>
           </el-table-column>
           <el-table-column prop="contract_section" label="标段" width="70" />
           <el-table-column prop="is_winner" label="中标" width="55">
@@ -687,21 +702,7 @@ const filteredProcurements = computed(() => {
   )
 })
 
-const upperPage = ref(1)
-const upperPageSize = ref(10)
 const upperTotal = computed(() => filteredProcurements.value.length)
-const upperPagedList = computed(() => {
-  const list = filteredProcurements.value
-  const start = (upperPage.value - 1) * upperPageSize.value
-  return list.slice(start, start + upperPageSize.value)
-})
-const upperPageJump = ref(1)
-function jumpUpperPage() {
-  const totalPages = Math.max(1, Math.ceil(upperTotal.value / upperPageSize.value))
-  const p = Math.max(1, Math.min(totalPages, Number(upperPageJump.value) || 1))
-  upperPage.value = p
-  upperPageJump.value = p
-}
 
 const processFiles = ref<any[]>([])
 const archiveFiles = ref<any[]>([])
@@ -709,15 +710,7 @@ const processFilePrintModes = ref<Record<string, string>>({})
 const processFileSelections = ref<any[]>([])
 
 const processFileTableMaxHeight = 350
-const archiveFilePage = ref(1)
-const archiveFilePageSize = 5
 const archiveFileSelections = ref<any[]>([])
-const archivePagedList = computed(() => {
-  const list = archiveFiles.value
-  const start = (archiveFilePage.value - 1) * archiveFilePageSize
-  return list.slice(start, start + archiveFilePageSize)
-})
-const archiveFileTotalPages = computed(() => Math.max(1, Math.ceil(archiveFiles.value.length / archiveFilePageSize)))
 
 const sortedSuppliers = computed(() => {
   const list = form.suppliers.filter((s) => s && (s.quoted_price ?? 0) >= 0)
@@ -760,7 +753,7 @@ async function loadProcurements() {
 async function loadProjectsForSelect(keyword: string) {
   projectsLoading.value = true
   try {
-    const list = await listProjects({ keyword: (keyword || '').trim(), page: 1, page_size: 100 })
+    const list = await listProjects({ keyword: (keyword || '').trim(), page: 1, page_size: 0 })
     let merged = list
     if (selectedProjectId.value && !list.find((p: any) => p.id === selectedProjectId.value)) {
       try {
@@ -848,7 +841,6 @@ async function loadFilesForProcurement(procId: number) {
     ])
     processFiles.value = Array.isArray(processRes) ? processRes : []
     archiveFiles.value = Array.isArray(archiveRes) ? archiveRes : []
-    archiveFilePage.value = 1
     processFilePrintModes.value = {}
   } catch {
     processFiles.value = []
@@ -1071,6 +1063,8 @@ async function editProcurementRow(row: any) {
       project_number: detail.project_number ?? '',
       project_id: detail.project_id_display ?? detail.project_id ?? '',
       construction_unit: detail.construction_unit ?? '',
+      construction_contact_person: detail.construction_contact_person ?? '',
+      construction_contact_phone: detail.construction_contact_phone ?? '',
       total_contract_price: detail.total_contract_price ?? 0,
       project_address: detail.project_address ?? '',
       department: detail.department ?? '',
@@ -1123,15 +1117,19 @@ async function editProcurementRow(row: any) {
     }))
     if (detail.procurement_method === '补充协议') {
       form.parent_contract_id = detail.parent_contract_id ?? null
-      form.supplement_amount = detail.control_price ?? 0
+      form.supplement_amount = Number((detail as any).supplement_amount) || 0
       form.supplement_content = detail.content ?? ''
       form.supplement_control_price = detail.step2?.supplement_control_price ?? 0
+      form.supplement_procurement_project_name =
+        detail.step2?.procurement_project_name ?? detail.procurement_project_name ?? ''
+      if (project.value) {
+        form.step2.project_name = project.value.project_name
+      }
       if (form.parent_contract_id) {
         const parentDetail = await getProcurement(form.parent_contract_id)
         form.supplement_is_dual = parentDetail?.procurement_method === '五选二'
         form.contract_section = parentDetail?.contract_section || ''
         await loadParentContractOptions()
-        // 确保当前主合同在选项中，避免编辑时显示为空（主合同可能不在常规候选列表）
         const pid = form.parent_contract_id
         const inOptions = parentContractOptions.value.some((p: any) => p.id === pid)
         if (!inOptions && parentDetail) {
@@ -1146,11 +1144,37 @@ async function editProcurementRow(row: any) {
             ...parentContractOptions.value,
           ]
         }
-        onParentContractSelect(form.parent_contract_id)
+        const opt = parentContractOptions.value.find((p: any) => p.id === pid)
+        const nextSuppSeq = (opt?.supplement_count ?? 0) + 1
+        const w = pickParentWinnerSupplier(parentDetail)
+        const orig = w ? Number(w.quoted_price) || 0 : 0
+        parentContractInfo.value = {
+          contract_number: parentDetail.contract_number,
+          original_price: orig,
+          supplier_name: w?.supplier_name,
+          sign_date: parentDetail.sign_date || '',
+          next_supplement_seq: nextSuppSeq,
+        }
+        if (w && form.suppliers.length) {
+          form.suppliers[0].business_scope = w.business_scope || ''
+          form.suppliers[0].tax_rate = w.tax_rate || ''
+          form.suppliers[0].quoted_price = Number(form.supplement_amount) || 0
+        }
       }
     }
-    form.time_records = (detail.time_records || []).map((r: any) => ({ flow_name: r.flow_name, date_val: r.date_val || '' }))
-    if (form.time_records.length === 0) initTimeRecords()
+    {
+      const existing = new Map(
+        (detail.time_records || []).map((r: any) => [r.flow_name, r.date_val || '']),
+      )
+      const hetongSaved = String(
+        detail.step2?.hetong_jiaodi ?? existing.get('合同交底') ?? '',
+      ).trim()
+      const names = getFlowNamesForMethod(form.step1.procurement_method)
+      form.time_records = names.map((name) => ({
+        flow_name: name,
+        date_val: name === '合同交底' ? hetongSaved : existing.get(name) || '',
+      }))
+    }
     currentStep.value = 0
     dialogVisible.value = true
   } catch (e: any) {
@@ -1174,8 +1198,6 @@ async function handleBatchDelete() {
     selectedProcurementForEdit.value = null
     selectedProcurementForFiles.value = null
     tableRef.value?.clearSelection?.()
-    const totalPages = Math.max(1, Math.ceil(filteredProcurements.value.length / upperPageSize.value))
-    if (upperPage.value > totalPages) upperPage.value = totalPages
   } catch (e: any) {
     if (e !== 'cancel') ElMessage.error('删除失败')
   }
@@ -1190,9 +1212,10 @@ async function handleExport() {
     }
     const fmt2 = (v: number | null | undefined) => (v != null && v !== '' && !Number.isNaN(Number(v)) ? Number(v).toFixed(2) : (v ?? ''))
     const rows = [
-      ['工程编号', '采购方式', '采购项目名称', '采购内容', '供应商', '合同价', '签订日期', '控制价', '备注'],
+      ['工程编号', '采购类型', '采购方式', '采购项目名称', '采购内容', '供应商', '合同价', '签订日期', '控制价', '备注'],
       ...list.map((p: any) => [
         project.value?.project_id || '',
+        p.procurement_type || '',
         p.procurement_method || '',
         p.project_name || '',
         p.content || '',
@@ -1219,6 +1242,16 @@ const dialogVisible = ref(false)
 const overviewVisible = ref(false)
 const overviewData = ref<any>(null)
 const overviewSuppliers = computed(() => overviewData.value?.suppliers ?? [])
+const overviewControlPriceLabel = computed(() => {
+  const o = overviewData.value
+  if (!o) return '-'
+  const p = formatContractPrice(o.control_price)
+  return p === '/' ? '/' : `${p} 元`
+})
+
+function formatSupplementQuotedDisplay(v: number | null | undefined) {
+  return formatContractPrice(v)
+}
 const currentStep = ref(0)
 const saving = ref(false)
 
@@ -1226,12 +1259,15 @@ const FLOW_NAMES_FULL = [
   '采购意向公告', '采购意向公告上网审批表', '意向报名截止日期', '交易文件', '交易文件审核表',
   '响应文件接收函', '响应文件递交截止日期', '供应商推荐表', '询比/单源采购会议通知', '供应商资格审查表',
   '询比/单源/直接采购记录及结果呈批表', '中选通知书', '合同文件呈批表', '用章申请表', '合同签订', '阳光采购平台公布结果',
+  '合同交底',
 ]
 const FLOW_NAMES_DIRECT = [
   '供应商推荐表', '询比\\单源\\直接采购记录及结果呈批表', '合同文件呈批表', '用章申请表', '合同签订', '阳光采购平台公布结果',
+  '合同交底',
 ]
 const FLOW_NAMES_SUPPLEMENT = [
   '合同文件呈批表', '用章申请表', '合同签订', '阳光采购平台公布结果',
+  '合同交底',
 ]
 
 const parentContractOptions = ref<any[]>([])
@@ -1242,6 +1278,7 @@ const form = reactive({
   supplement_amount: 0,
   supplement_content: '',
   supplement_control_price: 0,
+  supplement_procurement_project_name: '',
   supplement_is_dual: false,
   contract_section: '' as string,
   step1: {
@@ -1255,6 +1292,8 @@ const form = reactive({
     project_number: '',
     project_id: '',
     construction_unit: '',
+    construction_contact_person: '',
+    construction_contact_phone: '',
     total_contract_price: 0,
     project_address: '',
     department: '',
@@ -1329,6 +1368,7 @@ watch(() => form.step1.procurement_method, (v) => {
   if (v === '补充协议' && project.value && !editingProcurementId.value) {
     form.parent_contract_id = null
     parentContractInfo.value = null
+    form.supplement_procurement_project_name = ''
     loadParentContractOptions()
   }
 })
@@ -1352,14 +1392,19 @@ watch(selectedProcurementForFiles, (row) => {
     procurementName: row?.project_name ?? '',
   })
 })
+watch(
+  () => [form.supplement_amount, form.step1.procurement_method],
+  () => {
+    if (form.step1.procurement_method !== '补充协议' || !form.suppliers.length) return
+    if (form.suppliers.length === 1) {
+      form.suppliers[0].quoted_price = Number(form.supplement_amount) || 0
+    }
+  },
+)
+
 watch(activeFileTab, (tab) => {
   bc.setProcurementContext({ activeFileTab: tab })
 })
-watch(searchKeyword, () => {
-  upperPage.value = 1
-  upperPageJump.value = 1
-})
-
 function onMethodChange() {
   form.parent_contract_id = null
   form.supplement_amount = 0
@@ -1403,23 +1448,60 @@ async function loadParentContractOptions() {
   parentContractOptions.value = list
 }
 
+/** 补充协议：主合同中标供应商（五选二按主合同标段取排序第 1/2 名） */
+function pickParentWinnerSupplier(parentDetail: any) {
+  const list = (parentDetail?.suppliers || []).slice()
+  const sorted = [...list].sort(
+    (a: any, b: any) => (Number(a.quoted_price) || 0) - (Number(b.quoted_price) || 0),
+  )
+  if (parentDetail?.procurement_method === '五选二') {
+    const sect = parentDetail?.contract_section || ''
+    const idx = sect === '二标段' ? 1 : 0
+    return sorted[idx] || sorted[0] || null
+  }
+  return sorted[0] || null
+}
+
+function applySupplementSupplierFromParent(parentDetail: any, nextSuppSeq: number) {
+  const w = pickParentWinnerSupplier(parentDetail)
+  const orig = w ? Number(w.quoted_price) || 0 : 0
+  parentContractInfo.value = {
+    contract_number: parentDetail.contract_number,
+    original_price: orig,
+    supplier_name: w?.supplier_name,
+    sign_date: parentDetail.sign_date || '',
+    next_supplement_seq: nextSuppSeq,
+  }
+  if (!w) {
+    form.suppliers = []
+    return
+  }
+  form.suppliers = [
+    {
+      supplier_name: w.supplier_name || '',
+      contact_person: w.contact_person || '',
+      contact_phone: w.contact_phone || '',
+      business_scope: w.business_scope || '',
+      tax_rate: w.tax_rate || '',
+      quoted_price: Number(form.supplement_amount) || 0,
+    },
+  ]
+}
+
 async function onParentContractSelect(id: number) {
   if (!id) {
     parentContractInfo.value = null
+    form.suppliers = []
     return
   }
   try {
     const detail = await getProcurement(id)
     const opt = parentContractOptions.value.find((p: any) => p.id === id)
     const nextSuppSeq = (opt?.supplement_count ?? 0) + 1
-    parentContractInfo.value = {
-      contract_number: detail.contract_number,
-      original_price: detail.suppliers?.[0]?.quoted_price,
-      supplier_name: detail.suppliers?.[0]?.supplier_name,
-      sign_date: detail.sign_date || '',
-      next_supplement_seq: nextSuppSeq
+    applySupplementSupplierFromParent(detail, nextSuppSeq)
+    if (!form.supplement_procurement_project_name?.trim()) {
+      form.supplement_procurement_project_name = detail.procurement_project_name || ''
     }
-    form.step2.project_name = detail.project_name || form.step2.project_name
     form.step2.project_id = project.value?.project_id || ''
     form.step2.project_number = project.value?.project_number || ''
   } catch {
@@ -1462,6 +1544,8 @@ onMounted(async () => {
           project_number: project.value.project_number,
           project_id: project.value.project_id,
           construction_unit: project.value.construction_unit,
+          construction_contact_person: project.value.construction_contact_person || '',
+          construction_contact_phone: project.value.construction_contact_phone || '',
           total_contract_price: project.value.total_contract_price,
           project_address: project.value.project_address,
           department: project.value.department,
@@ -1533,7 +1617,7 @@ const canAddSupplier = computed(() => {
 
 const canRemoveSupplier = computed(() => {
   const m = form.step1.procurement_method
-  if (m === '单一来源' || m === '直接采购') return false
+  if (m === '补充协议' || m === '单一来源' || m === '直接采购') return false
   const min = getMinSuppliers(m)
   return form.suppliers.length > min
 })
@@ -1543,11 +1627,6 @@ async function highlightProcurementFromQuery() {
   if (pid && procurements.value.length) {
     const row = procurements.value.find((p: any) => String(p.id) === String(pid))
     if (row) {
-      const idx = filteredProcurements.value.findIndex((p: any) => p.id === row.id)
-      if (idx >= 0) {
-        upperPage.value = Math.floor(idx / upperPageSize.value) + 1
-        upperPageJump.value = upperPage.value
-      }
       await nextTick()
       tableRef.value?.setCurrentRow?.(row)
       selectedProcurementForFiles.value = row
@@ -1601,6 +1680,7 @@ function showAddProcurement() {
   form.supplement_amount = 0
   form.supplement_content = ''
   form.supplement_control_price = 0
+  form.supplement_procurement_project_name = ''
   form.supplement_is_dual = false
   form.contract_section = ''
   parentContractInfo.value = null
@@ -1626,6 +1706,8 @@ function showAddProcurement() {
       project_number: project.value.project_number,
       project_id: project.value.project_id,
       construction_unit: project.value.construction_unit,
+      construction_contact_person: project.value.construction_contact_person || '',
+      construction_contact_phone: project.value.construction_contact_phone || '',
       total_contract_price: project.value.total_contract_price,
       project_address: project.value.project_address,
       department: project.value.department,
@@ -1637,15 +1719,24 @@ function showAddProcurement() {
   dialogVisible.value = true
 }
 
+function mergedProcurementProjectName(): string {
+  if (form.step1.procurement_method === '补充协议') {
+    return (form.supplement_procurement_project_name || form.step2.procurement_project_name || '').trim()
+  }
+  return (form.step2.procurement_project_name || '').trim()
+}
+
 function buildPayload() {
   const signDate = form.step2.qianding_year && form.step2.qianding_month && form.step2.qianding_day
     ? `${form.step2.qianding_year}-${String(form.step2.qianding_month).padStart(2, '0')}-${String(form.step2.qianding_day).padStart(2, '0')}`
     : form.step2.sign_date
+  const procName = mergedProcurementProjectName()
   return {
     project_id: project.value.id,
     step1: { ...form.step1 },
     step2: {
       ...form.step2,
+      procurement_project_name: procName,
       control_price: form.step2.control_price ?? 0,
       sign_date: signDate,
       procurement_type: form.step1.procurement_type,
@@ -1668,16 +1759,25 @@ function buildPayload() {
   }
 }
 
+function hetongJiaodiFromForm(): string {
+  const row = form.time_records.find((r) => r.flow_name === '合同交底')
+  return (row?.date_val || '').trim()
+}
+
 function buildFormDataStr() {
   // 签订日期：优先从 qianding 年月日计算，否则用 sign_date；确保编辑后同步到台账和采购清单
   const signDate =
     form.step2.qianding_year && form.step2.qianding_month && form.step2.qianding_day
       ? `${form.step2.qianding_year}.${Number(form.step2.qianding_month)}.${Number(form.step2.qianding_day)}`
       : (form.step2.sign_date || '')
-  const base = {
+  const fullTime = form.time_records.map((r) => ({ flow_name: r.flow_name, date_val: r.date_val || '' }))
+  const _time_records = fullTime.filter((r) => r.flow_name !== '合同交底')
+  const base: Record<string, any> = {
     ...form.step2,
+    procurement_project_name: mergedProcurementProjectName() || form.step2.procurement_project_name,
     sign_date: signDate,
-    _time_records: form.time_records.map((r) => ({ flow_name: r.flow_name, date_val: r.date_val || '' })),
+    _time_records,
+    hetong_jiaodi: hetongJiaodiFromForm(),
   }
   if (form.step1.procurement_method === '补充协议') {
     base.content = form.supplement_content
@@ -1711,6 +1811,10 @@ async function submitProcurement() {
       ElMessage.error('请填写补充内容')
       return
     }
+    if (!mergedProcurementProjectName()) {
+      ElMessage.error('请填写采购项目名称')
+      return
+    }
     const suppSignDate =
       form.step2.qianding_year && form.step2.qianding_month && form.step2.qianding_day
         ? `${form.step2.qianding_year}.${Number(form.step2.qianding_month)}.${Number(form.step2.qianding_day)}`
@@ -1731,15 +1835,9 @@ async function submitProcurement() {
         }
       }
     }
-    if (!form.suppliers.length) {
-      form.suppliers.push({
-        supplier_name: parentContractInfo.value?.supplier_name || '同主合同',
-        contact_person: '',
-        contact_phone: '',
-        business_scope: '',
-        tax_rate: '',
-        quoted_price: (parentContractInfo.value?.original_price || 0) + form.supplement_amount
-      })
+    if (form.suppliers.length !== 1) {
+      ElMessage.error('补充协议须且仅能填写一家供应商，请先选择主合同以带出中标供应商')
+      return
     }
   } else {
     const minSuppliers = method === '五选二' ? 5 : method === '邀请询比' ? 3 : 1
@@ -1774,8 +1872,8 @@ async function submitProcurement() {
   try {
     if (editingProcurementId.value) {
       const updatePayload: Record<string, any> = {
-        project_name: form.step2.procurement_project_name,
-        content: form.step2.content,
+        project_name: mergedProcurementProjectName() || form.step2.procurement_project_name,
+        content: method === '补充协议' ? form.supplement_content : form.step2.content,
         form_data: buildFormDataStr(),
         suppliers: form.suppliers,
       }
@@ -1817,12 +1915,23 @@ async function submitProcurement() {
   .page-header {
     display: flex;
     justify-content: space-between;
-    align-items: center;
+    align-items: flex-start;
     margin-bottom: 16px;
     gap: 12px;
     .project-select-item { margin-bottom: 0; }
     .procurement-project-select { width: 400px !important; }
-    .search-input { width: 240px; }
+    .header-search-col {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 6px;
+    }
+    .search-input { width: 280px; }
+    .table-total-above-grid {
+      font-size: 14px;
+      color: var(--el-text-color-regular);
+      line-height: 1.4;
+    }
     h2 { font-size: 18px; }
   }
   .action-bar { margin-bottom: 16px; }
@@ -1871,6 +1980,7 @@ async function submitProcurement() {
   .table-scroll-wrapper { overflow-x: auto; width: 100%; }
   .step-content { margin-top: 24px; min-height: 200px; }
   .supplement-note { color: var(--el-text-color-secondary); margin-bottom: 12px; }
+  .cell-readonly { color: var(--el-text-color-regular); font-size: 13px; }
   .overview-content { max-height: 70vh; overflow-y: auto; }
   .file-name-link { color: var(--el-color-primary); cursor: pointer; }
   .file-name-link:hover { text-decoration: underline; }

@@ -10,7 +10,7 @@ from app.config import WORD_TEMPLATES_DIR
 
 FUNDING_TYPES = ["工程类", "自有资金"]
 PROJECT_TYPES = ["集团内工程", "集团外工程"]
-PROCUREMENT_TYPES = ["材料（设备）采购", "机械租赁"]
+PROCUREMENT_TYPES = ["材料（设备）采购", "材料租赁", "机械租赁"]
 PROCUREMENT_METHODS = ["单一来源", "邀请询比", "直接采购", "五选二", "补充协议"]
 
 

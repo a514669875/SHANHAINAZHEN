@@ -15,10 +15,12 @@ router = APIRouter(prefix="/api/users", tags=["users"])
 @router.get("", response_model=list[UserResponse])
 def list_users(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(get_current_user),
 ):
-    """List all users (admin only)."""
-    return db.query(User).all()
+    """列出用户：系统管理员可见全部；采购管理员仅可见本人（用于工程「经办人」等下拉，且前端限制仅选自己）。"""
+    if current_user.role == "系统管理员":
+        return db.query(User).all()
+    return [current_user]
 
 
 @router.post("", response_model=UserResponse)

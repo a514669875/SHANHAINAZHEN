@@ -25,6 +25,7 @@ export interface LedgerItem {
 export function listLedger(params: {
   keyword?: string
   page?: number
+  /** 0 = 不分页，一次返回全部 */
   page_size?: number
   sort_by?: string
   sort_order?: string

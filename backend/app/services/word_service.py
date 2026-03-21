@@ -4,10 +4,11 @@ import cn2an
 from docxtpl import DocxTemplate
 from app.config import get_word_templates_dir
 
-# PRD 3.6.2: 材料采购/设备采购 -> 材料（设备）采购
+# PRD 3.6.2: 材料采购/设备采购 -> 材料（设备）采购；材料租赁 -> 材料租赁（独立模板目录）
 PROC_TYPE_MAP = {
     "材料采购": "材料（设备）采购",
     "设备采购": "材料（设备）采购",
+    "材料租赁": "材料租赁",
     "机械租赁": "机械租赁",
 }
 
@@ -23,6 +24,8 @@ def _project_to_dict(p) -> dict:
         "project_number": p.project_number,
         "project_id": p.project_id,
         "construction_unit": p.construction_unit,
+        "construction_contact_person": getattr(p, "construction_contact_person", None) or "",
+        "construction_contact_phone": getattr(p, "construction_contact_phone", None) or "",
         "total_contract_price": p.total_contract_price,
         "project_address": p.project_address,
         "department": p.department,

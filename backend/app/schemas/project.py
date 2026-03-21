@@ -14,6 +14,8 @@ class ProjectBase(BaseModel):
     site_manager: str
     site_manager_phone: str
     construction_unit: str
+    construction_contact_person: Optional[str] = ""
+    construction_contact_phone: Optional[str] = ""
     total_contract_price: float
     project_duration: Optional[str] = None  # 工程工期
     funding_source: str
@@ -35,6 +37,8 @@ class ProjectUpdate(BaseModel):
     site_manager: Optional[str] = None
     site_manager_phone: Optional[str] = None
     construction_unit: Optional[str] = None
+    construction_contact_person: Optional[str] = None
+    construction_contact_phone: Optional[str] = None
     total_contract_price: Optional[float] = None
     project_duration: Optional[str] = None
     funding_source: Optional[str] = None
@@ -45,6 +49,8 @@ class ProjectUpdate(BaseModel):
 class ProjectResponse(ProjectBase):
     id: int
     create_date: Optional[date] = None
+    # 服务端解析 procurement_officers ID 列表为人名（多行）；清单/详情统一返回，供采购管理员等无法拉全量用户列表时展示
+    procurement_officer_display: str = ""
 
     class Config:
         from_attributes = True

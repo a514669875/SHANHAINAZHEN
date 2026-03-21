@@ -2,15 +2,18 @@
   <div class="ledger-view">
     <div class="page-header">
       <h2>智能台账</h2>
-      <el-input
-        v-model="searchKeyword"
-        placeholder="合同编号/供应商/工程名称"
-        clearable
-        style="width: 240px"
-        @keyup.enter="loadData"
-      >
-        <template #prefix><el-icon><Search /></el-icon></template>
-      </el-input>
+      <div class="header-right-col">
+        <el-input
+          v-model="searchKeyword"
+          placeholder="合同编号/供应商/工程名称"
+          clearable
+          class="search-input"
+          @keyup.enter="loadData"
+        >
+          <template #prefix><el-icon><Search /></el-icon></template>
+        </el-input>
+        <div class="table-total-above-grid">共 {{ total }} 条</div>
+      </div>
     </div>
     <div class="action-bar">
       <el-upload
@@ -28,14 +31,14 @@
       style="width: 100%"
       border
       row-key="id"
-      max-height="calc(100vh - 220px)"
+      max-height="calc(100vh - 180px)"
       @row-dblclick="goToProcurement"
       @selection-change="handleSelectionChange"
       @sort-change="handleSortChange"
       @filter-change="handleFilterChange"
     >
       <el-table-column type="selection" width="50" :resizable="false" />
-      <el-table-column type="index" label="序号" width="60" :index="(i) => (currentPage - 1) * pageSize + i + 1" :resizable="false" />
+      <el-table-column type="index" label="序号" width="60" :index="(i) => i + 1" :resizable="false" />
       <el-table-column
         prop="funding_type"
         label="资金类别"
@@ -55,7 +58,10 @@
         :filters="groupTypeFilters"
         :filtered-value="groupTypeFilter ? [groupTypeFilter] : []"
         :filter-method="() => true"
-      />
+      >
+        <template #default="{ row }">{{ (row.group_type && String(row.group_type).trim()) ? row.group_type : '-' }}</template>
+      </el-table-column>
+      <el-table-column prop="procurement_type" label="采购类型" width="100" resizable />
       <el-table-column
         prop="procurement_method"
         label="采购方式"
@@ -77,6 +83,8 @@
       <el-table-column prop="project_name" label="工程名称" min-width="120" resizable />
       <el-table-column prop="procurement_name" label="采购项目名称" min-width="120" resizable />
       <el-table-column prop="supplier" label="供应商" width="120" resizable />
+      <el-table-column prop="supplier_contact_person" label="供应商联系人" width="100" resizable />
+      <el-table-column prop="supplier_contact_phone" label="供应商联系方式" width="110" resizable />
       <el-table-column prop="contract_price" label="合同价" width="100" resizable sortable="custom">
         <template #default="{ row }">{{ formatContractPrice(row.contract_price) }}</template>
       </el-table-column>
@@ -84,6 +92,11 @@
         <template #default="{ row }">{{ formatDateYMD(row.sign_date) }}</template>
       </el-table-column>
       <el-table-column prop="content" label="采购内容" min-width="100" resizable />
+      <el-table-column prop="other_participants" label="其余参与方" min-width="120" resizable>
+        <template #default="{ row }">
+          <span style="white-space: pre-line">{{ row.other_participants }}</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="control_price" label="采购控制价" width="110" resizable>
         <template #default="{ row }">{{ formatContractPrice(row.control_price) }}</template>
       </el-table-column>
@@ -116,15 +129,6 @@
       </el-table-column>
     </el-table>
     </div>
-    <div class="pagination">
-      <span>共 {{ total }} 条记录</span>
-      <el-pagination
-        v-model:current-page="currentPage"
-        v-model:page-size="pageSize"
-        :total="total"
-        layout="prev, pager, next, jumper"
-      />
-    </div>
   </div>
 </template>
 
@@ -139,8 +143,6 @@ const router = useRouter()
 
 const tableData = ref<any[]>([])
 const total = ref(0)
-const currentPage = ref(1)
-const pageSize = ref(20)
 const searchKeyword = ref('')
 const selectedRows = ref<any[]>([])
 const sortBy = ref('')
@@ -175,7 +177,6 @@ function handleSelectionChange(rows: any[]) {
 function handleSortChange({ prop, order }: { prop?: string; order?: string }) {
   sortBy.value = prop || ''
   sortOrder.value = (order === 'descending' ? 'descending' : 'ascending') as 'ascending' | 'descending'
-  currentPage.value = 1
   loadData()
 }
 
@@ -183,19 +184,18 @@ function handleFilterChange(filters: Record<string, string[]>) {
   fundingTypeFilter.value = filters.funding_type?.[0] || ''
   groupTypeFilter.value = filters.group_type?.[0] || ''
   procurementMethodFilter.value = filters.procurement_method?.[0] || ''
-  currentPage.value = 1
   loadData()
 }
 
 onMounted(loadData)
-watch([currentPage, pageSize, searchKeyword], loadData)
+watch([searchKeyword], loadData)
 
 async function loadData() {
   try {
     const params: Record<string, unknown> = {
       keyword: searchKeyword.value,
-      page: currentPage.value,
-      page_size: pageSize.value,
+      page: 1,
+      page_size: 0,
     }
     if (sortBy.value) {
       params.sort_by = sortBy.value
@@ -218,7 +218,21 @@ async function openPreview(url: string) {
     const token = localStorage.getItem('token')
     const fullUrl = url.startsWith('/') ? `${window.location.origin}${url}` : url
     const res = await fetch(fullUrl, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
-    if (!res.ok) throw new Error(res.status === 401 ? '未登录或登录已过期' : '打开失败')
+    if (!res.ok) {
+      let detail = ''
+      try {
+        const errBody = await res.clone().text()
+        const j = JSON.parse(errBody)
+        if (typeof j.detail === 'string') detail = j.detail
+        else if (Array.isArray(j.detail)) detail = j.detail.map((x: any) => x.msg || x).join('; ')
+      } catch {
+        /* 非 JSON 错误体 */
+      }
+      throw new Error(
+        detail ||
+          (res.status === 401 ? '未登录或登录已过期' : `打开失败（HTTP ${res.status}）`),
+      )
+    }
     const blob = await res.blob()
     const blobUrl = URL.createObjectURL(blob)
     window.open(blobUrl, '_blank')
@@ -275,8 +289,21 @@ async function handleExport() {
   .page-header {
     display: flex;
     justify-content: space-between;
+    align-items: flex-start;
     margin-bottom: 16px;
     h2 { font-size: 18px; }
+    .header-right-col {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 6px;
+    }
+    .search-input { width: 240px; }
+    .table-total-above-grid {
+      font-size: 14px;
+      color: var(--el-text-color-regular);
+      line-height: 1.4;
+    }
   }
   .action-bar {
     margin-bottom: 16px;
@@ -289,12 +316,6 @@ async function handleExport() {
     cursor: pointer;
   }
   .contract-number-link:hover { text-decoration: underline; }
-  .pagination {
-    margin-top: 16px;
-    display: flex;
-    align-items: center;
-    gap: 16px;
-  }
   .table-scroll-wrapper { overflow-x: auto; width: 100%; }
 }
 </style>

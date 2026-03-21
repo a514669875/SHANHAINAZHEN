@@ -19,7 +19,7 @@ class TimeRecordInput(BaseModel):
 
 
 class ProcurementStep1(BaseModel):
-    procurement_type: str  # 材料采购/设备采购/机械租赁
+    procurement_type: str  # 材料采购/材料租赁/设备采购/机械租赁
     procurement_method: str  # 邀请询比/单一来源/直接采购/补充协议/五选二
 
 
@@ -77,6 +77,10 @@ class ProcurementStep2(BaseModel):
     kongzhijia_biao2: Optional[float] = None
     chengjiao_jine1: Optional[float] = None  # 成交金额1，用户输入
     chengjiao_jine2: Optional[float] = None  # 成交金额2，用户输入
+    # 流程时间末行「合同交底」文本，同步入 form_data（与 _time_records 分列存储）
+    hetong_jiaodi: str = ""
+    # 补充协议：用户填写的「控制价」须进 form_data，供清单/台账/总览读取（与根级 supplement_control_price 同步）
+    supplement_control_price: Optional[float] = None
 
 
 class ProcurementCreate(BaseModel):

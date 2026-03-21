@@ -1,4 +1,14 @@
 {
-    "python-envs.defaultEnvManager": "ms-python.python:system",
-    "python-envs.pythonProjects": []
+  "python-envs.defaultEnvManager": "ms-python.python:system",
+  "python-envs.pythonProjects": [],
+
+  // 终端标签：优先显示「任务名」，手动开的终端则显示当前文件夹名 + 进程，避免多个都叫 cmd
+  "terminal.integrated.tabs.title": "${task}${separator}${cwdFolder}",
+  "terminal.integrated.tabs.description": "${process}",
+
+  // 终端内 Ctrl+点击 打开 http(s) / 文件链接（仍建议用 PowerShell 或 Windows Terminal 配置文件，识别更好）
+  "terminal.integrated.enableFileLinks": true,
+
+  // Windows 下若 cmd 里链接不好点，可改为 "PowerShell" 或已安装的 "Windows PowerShell"
+  // "terminal.integrated.defaultProfile.windows": "PowerShell"
 }

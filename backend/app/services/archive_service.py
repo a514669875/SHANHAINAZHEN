@@ -8,7 +8,7 @@ from app.models.file import File
 from app.models.ledger import Ledger
 from app.models.supplier import Supplier
 from app.config import ARCHIVED_FILE_ROOT
-from app.services.procurement_service import create_ledger_record
+from app.services.procurement_service import create_ledger_record, sync_ledgers_on_procurement_update
 
 
 def _parse_form_data(form_data: str) -> dict:
@@ -221,6 +221,12 @@ def try_archive_and_create_ledgers(
             ledger = db.query(Ledger).filter(Ledger.procurement_id == proc.id).first()
             if ledger:
                 ledger.pdf_preview_path = f"/api/files/{f_for_proc.id}/content"
+
+    # 填充台账联系人、其余参与方等派生字段（与采购供应商同步）
+    for pid in proc_ids:
+        pobj = db.query(Procurement).filter(Procurement.id == pid).first()
+        if pobj:
+            sync_ledgers_on_procurement_update(db, pobj)
 
     # 归档后清理 _temp 空目录
     try:

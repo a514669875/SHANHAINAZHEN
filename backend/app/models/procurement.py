@@ -10,7 +10,7 @@ class Procurement(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     project_id = Column(Integer, ForeignKey("t_project.id", ondelete="CASCADE"), nullable=False)
-    procurement_type = Column(String(50))  # 材料采购/设备采购/机械租赁
+    procurement_type = Column(String(50))  # 材料采购/材料租赁/设备采购/机械租赁
     procurement_method = Column(String(50))  # 邀请询比/单一来源/直接采购/补充协议/五选二
     project_name = Column(String(255))  # 采购项目名称
     content = Column(String(500))  # 采购内容

@@ -118,6 +118,21 @@ import { getTemplateStructure, getTemplateConfig, updateTemplateConfig } from '@
 import type { User } from '@/api/types'
 import type { UserCreate, UserUpdate } from '@/api/users'
 
+/** 后端 FastAPI：detail 可能是字符串或校验错误数组，统一成可读文案 */
+function apiErrorMessage(e: any, fallback: string): string {
+  const d = e?.response?.data?.detail
+  if (typeof d === 'string' && d.trim()) return d
+  if (Array.isArray(d) && d.length) {
+    return d.map((x: any) => (typeof x?.msg === 'string' ? x.msg : JSON.stringify(x))).join('；')
+  }
+  if (e?.message === 'Network Error') return '网络异常，请确认后端已启动且地址正确'
+  const st = e?.response?.status
+  if (st === 403) return '无权限（需系统管理员登录）'
+  if (st === 401) return '登录已失效，请重新登录'
+  if (st) return `${fallback}（HTTP ${st}）`
+  return fallback
+}
+
 const userStore = useUserStore()
 const activeTab = ref('users')
 const users = ref<User[]>([])
@@ -199,7 +214,7 @@ async function saveTemplatePath() {
     ElMessage.success('模板路径已保存')
     await loadTemplates()
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.detail || '保存失败')
+    ElMessage.error(apiErrorMessage(e, '保存失败'))
   } finally {
     templatePathSaving.value = false
   }
@@ -263,7 +278,7 @@ async function saveUser() {
       userDialogVisible.value = false
       await loadUsers()
     } catch (e: any) {
-      ElMessage.error(e.response?.data?.detail || '操作失败')
+      ElMessage.error(apiErrorMessage(e, '操作失败'))
     }
   })
 }
@@ -277,7 +292,7 @@ async function deleteUser(user: User) {
     ElMessage.success('删除成功')
     await loadUsers()
   } catch (e: any) {
-    ElMessage.error(e.response?.data?.detail || '删除失败')
+    ElMessage.error(apiErrorMessage(e, '删除失败'))
   }
 }
 </script>

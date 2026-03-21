@@ -140,8 +140,12 @@ const breadcrumbs = computed(() => {
   return items
 })
 
-onMounted(() => {
-  userStore.fetchUser()
+onMounted(async () => {
+  await userStore.fetchUser()
+  // 本地有失效 token 时 /auth/me 返回 null，需退回登录页（路由守卫只判断 token 是否存在）
+  if (!userStore.token) {
+    await router.replace({ name: 'Login', query: { redirect: route.fullPath } })
+  }
 })
 
 function handleCommand(cmd: string) {

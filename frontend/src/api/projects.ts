@@ -11,11 +11,15 @@ export interface Project {
   site_manager: string
   site_manager_phone: string
   construction_unit: string
+  construction_contact_person?: string
+  construction_contact_phone?: string
   total_contract_price: number
   project_duration?: string
   funding_source: string
   project_address: string
   procurement_officers: string
+  /** 服务端解析后的经办人姓名（多行），清单/详情均有；优先用于展示 */
+  procurement_officer_display?: string
   create_date?: string
 }
 
@@ -29,6 +33,8 @@ export interface ProjectCreate {
   site_manager: string
   site_manager_phone: string
   construction_unit: string
+  construction_contact_person?: string
+  construction_contact_phone?: string
   total_contract_price: number
   project_duration?: string
   funding_source: string
@@ -41,6 +47,7 @@ export interface ProjectUpdate extends Partial<ProjectCreate> {}
 export function listProjects(params: {
   keyword?: string
   page?: number
+  /** 0 = 不分页，一次返回全部 */
   page_size?: number
 }): Promise<Project[]> {
   return request.get('/projects', { params })

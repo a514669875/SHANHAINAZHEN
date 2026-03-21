@@ -136,7 +136,7 @@ const procurementSelectWidth = computed(() => {
 const initFromQuery = ref(false)
 
 onMounted(async () => {
-  projects.value = await listProjects({ page: 1, page_size: 100 })
+  projects.value = await listProjects({ page: 1, page_size: 0 })
   const qProjectId = route.query.project_id
   const qProcurementId = route.query.procurement_id
   if (qProjectId && qProcurementId) {

@@ -1,4 +1,12 @@
-"""测试数据种子脚本 - 用于遍历测试 ShanHaiNaZhen 采购系统全功能。"""
+"""测试数据种子脚本 - 用于遍历测试 ShanHaiNaZhen 采购系统全功能。
+
+运行前需已执行 scripts/init_db.py，且默认管理员存在。
+
+注意：本脚本非幂等，重复运行可能因工程编号/文件夹已存在而部分失败。
+若需按贵司真实字段与枚举定制批量造数，请填写项目根目录 docs/seed_data_template.md 后发回维护者。
+
+详见 docs/TESTING.md。
+"""
 import sys
 from pathlib import Path
 from datetime import date
@@ -244,6 +252,30 @@ def seed():
         db.commit()
         db.refresh(proc7)
 
+        # --- 采购 8: 材料租赁（与材料采购共用 材X 序号池）---
+        seq_ml = get_next_contract_seq(db, p1.id, "材料租赁")
+        proc_ml = Procurement(
+            project_id=p1.id,
+            procurement_type="材料租赁",
+            procurement_method="直接采购",
+            project_name="脚手架租赁",
+            content="脚手架租赁",
+            control_price=50000,
+            contract_number=generate_contract_number(p1, "材料租赁", seq_ml),
+            sign_date="2024-03-20",
+            is_draft=False,
+            form_data="{}",
+        )
+        db.add(proc_ml)
+        db.flush()
+        db.add(Supplier(procurement_id=proc_ml.id, supplier_name="租赁供应商", quoted_price=48000, rank=1, is_winner=True))
+        try:
+            create_procurement_folder(p1, proc_ml, "脚手架租赁")
+        except Exception:
+            pass
+        db.commit()
+        db.refresh(proc_ml)
+
         print("=" * 50)
         print("测试数据创建成功")
         print("=" * 50)
@@ -256,6 +288,7 @@ def seed():
         print(f"    - 五选二: 一标段={proc4a.id}, 二标段={proc4b.id}")
         print(f"    - 补充协议(完成): id={proc6.id}, 合同号={proc6.contract_number}")
         print(f"    - 补充协议(草稿): id={proc7.id}")
+        print(f"    - 材料租赁(完成): id={proc_ml.id}, 合同号={proc_ml.contract_number}")
         print("=" * 50)
     finally:
         db.close()

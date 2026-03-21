@@ -1,4 +1,6 @@
 """Authentication dependencies."""
+from typing import Optional
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
@@ -38,7 +40,39 @@ async def get_current_user(
     return user
 
 
+async def get_current_user_optional(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: Session = Depends(get_db),
+) -> Optional[User]:
+    """用于 GET /auth/me：未登录或 token 无效时返回 None（HTTP 200 + null），避免无意义 401 日志与前端全局拦截误跳转。"""
+    if not credentials:
+        return None
+    token = credentials.credentials
+    payload = decode_token(token)
+    if not payload:
+        return None
+    user_id = payload.get("sub")
+    if not user_id:
+        return None
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return None
+    user = db.query(User).filter(User.id == uid).first()
+    if not user or not user.is_active:
+        return None
+    return user
+
+
 async def get_current_admin(current_user: User = Depends(get_current_user)) -> User:
     if current_user.role != "系统管理员":
         raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user
+
+
+async def get_authenticated_user(current_user: User = Depends(get_current_user)) -> User:
+    """
+    任意已登录且启用的用户（不区分系统管理员 / 采购管理员）。
+    用于台账/工程等 **导出 Excel** 等只读导出接口，与业务上的「谁能看见列表」一致，不在此处再做角色限制。
+    """
     return current_user

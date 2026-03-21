@@ -18,6 +18,8 @@ class Project(Base):
     site_manager = Column(String(100))  # 项目现场管理员
     site_manager_phone = Column(String(50))  # 项目现场管理员联系方式
     construction_unit = Column(String(255))  # 建设单位
+    construction_contact_person = Column(String(100))  # 发包方联系人
+    construction_contact_phone = Column(String(100))  # 发包方联系方式
     total_contract_price = Column(Float)  # 总包合同价
     project_duration = Column(String(500))  # 工程工期
     funding_source = Column(String(100))  # 资金来源

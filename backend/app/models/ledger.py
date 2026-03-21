@@ -19,9 +19,12 @@ class Ledger(Base):
     project_name = Column(String(255))
     procurement_name = Column(String(255))
     supplier = Column(String(255))
+    supplier_contact_person = Column(String(100))  # 中标供应商联系人（与采购同步）
+    supplier_contact_phone = Column(String(100))  # 中标供应商联系方式（与采购同步）
     contract_price = Column(Float)
     sign_date = Column(String(50))
     content = Column(String(500))
+    other_participants = Column(Text)  # 其余参与方，换行分隔
     control_price = Column(Float)
     funding_source = Column(String(100))
     officer = Column(String(255))  # 经办人，可多选

@@ -17,7 +17,12 @@ export const useUserStore = defineStore('user', () => {
   async function fetchUser() {
     if (!token.value) return
     try {
-      user.value = await getMe()
+      const u = await getMe()
+      if (!u) {
+        logout()
+        return
+      }
+      user.value = u
     } catch {
       logout()
     }

@@ -86,26 +86,74 @@ def _parse_form_data(form_data: str) -> dict:
             return {}
 
 
+def _form_data_str_from_step2_time_records(step2: dict, time_records: list) -> str:
+    """form_data：_time_records 不含「合同交底」行，其文本写入 hetong_jiaodi（目录.docx 仍用完整 time_records）。"""
+    tr_out = []
+    hj = str(step2.get("hetong_jiaodi") or "") if isinstance(step2, dict) else ""
+    for r in time_records or []:
+        fn = r.get("flow_name") or ""
+        if fn == "合同交底":
+            dv = r.get("date_val") or ""
+            if dv:
+                hj = dv
+            continue
+        tr_out.append({"flow_name": fn, "date_val": r.get("date_val", "")})
+    merged = {**step2, "_time_records": tr_out, "hetong_jiaodi": hj}
+    return str(merged)
+
+
+def _parent_winning_supplier_for_supplement(db: Session, parent: Procurement) -> Supplier | None:
+    """补充协议与主合同中标一致；五选二主合同为某标段时取该标段对应排序名次供应商。"""
+    sups = db.query(Supplier).filter(Supplier.procurement_id == parent.id).all()
+    if not sups:
+        return None
+    sorted_sups = sorted(
+        sups,
+        key=lambda s: float(s.quoted_price) if s.quoted_price is not None and s.quoted_price != "" else float("inf"),
+    )
+    if parent.procurement_method == "五选二" and (parent.contract_section or "") == "二标段" and len(sorted_sups) > 1:
+        return sorted_sups[1]
+    return sorted_sups[0]
+
+
+def _time_records_for_mulu(form_dict: dict) -> list:
+    """目录.docx 用完整时间线：_time_records + 合同交底（来自 hetong_jiaodi 或行内日期）。"""
+    if not isinstance(form_dict, dict):
+        return []
+    tr = [dict(x) for x in (form_dict.get("_time_records", []) or [])]
+    hj = str(form_dict.get("hetong_jiaodi") or "").strip()
+    if not any((r.get("flow_name") or "") == "合同交底" for r in tr):
+        tr.append({"flow_name": "合同交底", "date_val": hj})
+    else:
+        for r in tr:
+            if (r.get("flow_name") or "") == "合同交底" and not (str(r.get("date_val") or "").strip()) and hj:
+                r["date_val"] = hj
+    return tr
+
+
 def _is_time_records_only_change(
     old_form_data: str,
     new_form_data: str | None,
     old_suppliers: list,
     new_suppliers: list | None,
 ) -> bool:
-    """判断是否仅流程时间表（_time_records）变更。若仅变更则只更新目录.docx。"""
+    """判断是否仅第4步流程时间表变更（_time_records + 合同交底 hetong_jiaodi）。是则只更新目录.docx。"""
     if not new_form_data:
         return False
     old_fd = _parse_form_data(old_form_data)
     new_fd = _parse_form_data(new_form_data)
     if not isinstance(old_fd, dict) or not isinstance(new_fd, dict):
         return False
-    old_without = {k: v for k, v in old_fd.items() if k != "_time_records"}
-    new_without = {k: v for k, v in new_fd.items() if k != "_time_records"}
+    _skip = ("_time_records", "hetong_jiaodi")
+    old_without = {k: v for k, v in old_fd.items() if k not in _skip}
+    new_without = {k: v for k, v in new_fd.items() if k not in _skip}
     if old_without != new_without:
         return False
     old_tr = old_fd.get("_time_records", [])
     new_tr = new_fd.get("_time_records", [])
-    if old_tr == new_tr:
+    old_hj = str(old_fd.get("hetong_jiaodi") or "").strip()
+    new_hj = str(new_fd.get("hetong_jiaodi") or "").strip()
+    if old_tr == new_tr and old_hj == new_hj:
         return False
     # 供应商未变更（new_suppliers 在 dump 中时需比较；不在 dump 则视为未变更）
     if new_suppliers is not None:
@@ -290,7 +338,13 @@ def list_procurements(
                         fd = ast.literal_eval(p.form_data) if p.form_data else {}
                     if isinstance(fd, dict):
                         sc = fd.get("supplement_control_price")
-                        _control_price = float(sc) if sc is not None and sc != "" else None
+                        if sc is None or sc == "" or str(sc).strip() == "/":
+                            _control_price = None
+                        else:
+                            try:
+                                _control_price = float(sc)
+                            except (ValueError, TypeError):
+                                _control_price = None
                 except Exception:
                     pass
         else:
@@ -396,7 +450,14 @@ def get_procurement(
                 data = ast.literal_eval(proc.form_data)
             if isinstance(data, dict):
                 step2 = {k: v for k, v in data.items() if k != "_time_records"}
-                time_records = data.get("_time_records", [])
+                time_records = list(data.get("_time_records", []) or [])
+                hj = str(data.get("hetong_jiaodi") or "").strip()
+                if not any((r.get("flow_name") or "") == "合同交底" for r in time_records):
+                    time_records.append({"flow_name": "合同交底", "date_val": hj})
+                elif hj:
+                    for r in time_records:
+                        if (r.get("flow_name") or "") == "合同交底" and not (r.get("date_val") or "").strip():
+                            r["date_val"] = hj
         except Exception:
             pass
     # 工程项目信息从 Project 取（暂存载入时正确回填）；采购项目名称/内容若为草稿占位则返回空
@@ -411,6 +472,20 @@ def get_procurement(
     _site_manager_phone = project.site_manager_phone or ""
     _proc_name = proc.project_name if (proc.project_name or "") != "草稿" else ""
     _content = proc.content if (proc.content or "") != "草稿" else ""
+    # 补充协议：总览「控制价」= supplement_control_price；新增金额单独字段 supplement_amount（与 DB proc.control_price 一致）
+    _overview_control = proc.control_price
+    _supplement_amount = None
+    if proc.procurement_method == "补充协议":
+        _supplement_amount = proc.control_price
+        if isinstance(step2, dict):
+            sc = step2.get("supplement_control_price")
+            if sc is None or sc == "" or str(sc).strip() == "/":
+                _overview_control = None
+            else:
+                try:
+                    _overview_control = float(sc)
+                except (ValueError, TypeError):
+                    _overview_control = None
     return {
         "id": proc.id,
         "project_id": proc.project_id,
@@ -420,6 +495,8 @@ def get_procurement(
         "project_number": _proj_number,
         "project_id_display": _proj_id,
         "construction_unit": _construction,
+        "construction_contact_person": getattr(project, "construction_contact_person", None) or "",
+        "construction_contact_phone": getattr(project, "construction_contact_phone", None) or "",
         "total_contract_price": _total_price,
         "project_address": _proj_address,
         "department": _department,
@@ -427,7 +504,8 @@ def get_procurement(
         "site_manager_phone": _site_manager_phone,
         "procurement_project_name": _proc_name,
         "content": _content,
-        "control_price": proc.control_price,
+        "control_price": _overview_control,
+        "supplement_amount": _supplement_amount,
         "contract_number": proc.contract_number,
         "sign_date": proc.sign_date,
         "contract_section": proc.contract_section,
@@ -440,7 +518,7 @@ def get_procurement(
                 "contact_phone": s.contact_phone,
                 "business_scope": s.business_scope or "",
                 "tax_rate": s.tax_rate or "",
-                "quoted_price": (proc.control_price or 0) if proc.procurement_method == "补充协议" else (s.quoted_price or 0),
+                "quoted_price": s.quoted_price or 0,
                 "is_winner": s.is_winner or (winner_b_name is not None and s.supplier_name == winner_b_name),
                 "contract_section": s.contract_section or "",
             }
@@ -468,11 +546,18 @@ def create_procurement(
     step2["project_number"] = project.project_number
     step2["project_id"] = project.project_id
     step2["construction_unit"] = project.construction_unit
+    step2["construction_contact_person"] = getattr(project, "construction_contact_person", None) or ""
+    step2["construction_contact_phone"] = getattr(project, "construction_contact_phone", None) or ""
     step2["total_contract_price"] = project.total_contract_price
     step2["project_address"] = project.project_address
     step2["department"] = project.department
     step2["site_manager"] = project.site_manager
     step2["site_manager_phone"] = project.site_manager_phone
+    # 补充协议控制价：前端可能在根级 supplement_control_price 传值，而 Pydantic 曾丢弃未声明字段；合并进 step2 以写入 form_data
+    if step1["procurement_method"] == "补充协议":
+        root_scp = getattr(data, "supplement_control_price", None)
+        if root_scp is not None:
+            step2["supplement_control_price"] = root_scp
 
     suppliers_data = [s.model_dump() for s in data.suppliers]
     method = step1["procurement_method"]
@@ -514,7 +599,7 @@ def create_procurement(
     if method == "五选二" and not is_draft:
         # Create two procurements
         seq = get_next_contract_seq(db, project.id, step1["procurement_type"])
-        form_data_str = str({**step2, "_time_records": [{"flow_name": r.get("flow_name", ""), "date_val": r.get("date_val", "")} for r in data.time_records]})
+        form_data_str = _form_data_str_from_step2_time_records(step2, data.time_records)
         proc_a = Procurement(
             project_id=project.id,
             procurement_type=step1["procurement_type"],
@@ -596,13 +681,13 @@ def create_procurement(
         if not parent:
             raise HTTPException(status_code=400, detail="主合同不存在")
         supplement_content = data.supplement_content or step2.get("content", "")
-        form_data_str = str({**step2, "_time_records": [{"flow_name": r.get("flow_name", ""), "date_val": r.get("date_val", "")} for r in data.time_records]})
+        form_data_str = _form_data_str_from_step2_time_records(step2, data.time_records)
         proc = Procurement(
             project_id=project.id,
             procurement_type=step1["procurement_type"],
             procurement_method=method,
             parent_contract_id=data.parent_contract_id,
-            project_name=parent.project_name or step2.get("procurement_project_name", ""),
+            project_name=step2.get("procurement_project_name") or parent.project_name or "",
             content=supplement_content or "",
             control_price=data.supplement_amount or 0,
             budget=0,
@@ -614,16 +699,16 @@ def create_procurement(
         db.add(proc)
         db.flush()
         s = sorted_suppliers[0] if sorted_suppliers else {"supplier_name": "", "contact_person": "", "contact_phone": "", "business_scope": "", "tax_rate": "", "quoted_price": 0}
-        parent_winner = db.query(Supplier).filter(Supplier.procurement_id == data.parent_contract_id).order_by(Supplier.rank).first()
-        total_price = (parent_winner.quoted_price or 0) + (data.supplement_amount or 0)
+        parent_winner = _parent_winning_supplier_for_supplement(db, parent)
+        sup_amt = data.supplement_amount or 0
         db.add(Supplier(
             procurement_id=proc.id,
             supplier_name=parent_winner.supplier_name if parent_winner else s.get("supplier_name", ""),
-            contact_person=s.get("contact_person", ""),
-            contact_phone=s.get("contact_phone", ""),
-            business_scope=s.get("business_scope", ""),
-            tax_rate=s.get("tax_rate", ""),
-            quoted_price=total_price,
+            contact_person=(parent_winner.contact_person if parent_winner else None) or s.get("contact_person", ""),
+            contact_phone=(parent_winner.contact_phone if parent_winner else None) or s.get("contact_phone", ""),
+            business_scope=(parent_winner.business_scope if parent_winner else None) or s.get("business_scope", ""),
+            tax_rate=(parent_winner.tax_rate if parent_winner else None) or s.get("tax_rate", ""),
+            quoted_price=sup_amt,
             rank=1,
             is_winner=True,
         ))
@@ -631,9 +716,17 @@ def create_procurement(
         try:
             from app.services.word_service import _project_to_dict, build_context, get_template_path, render_docx
             folder_path = create_procurement_folder(project, proc, "草稿", db=db)
-            supp_control = getattr(data, "supplement_control_price", None) or data.supplement_amount or 0
+            supp_raw = getattr(data, "supplement_control_price", None)
+            if supp_raw is None and isinstance(step2, dict):
+                supp_raw = step2.get("supplement_control_price")
+            supp_control = 0.0
+            if supp_raw is not None and supp_raw != "" and str(supp_raw).strip() != "/":
+                try:
+                    supp_control = float(supp_raw)
+                except (ValueError, TypeError):
+                    supp_control = 0.0
             step2_supp = {**step2, "content": supplement_content, "control_price": supp_control, "project_name": parent.project_name or step2.get("procurement_project_name", "")}
-            supp_suppliers = [{"supplier_name": parent_winner.supplier_name if parent_winner else s.get("supplier_name", ""), "contact_person": s.get("contact_person", ""), "contact_phone": s.get("contact_phone", ""), "business_scope": s.get("business_scope", ""), "tax_rate": s.get("tax_rate", ""), "quoted_price": total_price}]
+            supp_suppliers = [{"supplier_name": parent_winner.supplier_name if parent_winner else s.get("supplier_name", ""), "contact_person": s.get("contact_person", ""), "contact_phone": s.get("contact_phone", ""), "business_scope": s.get("business_scope", ""), "tax_rate": s.get("tax_rate", ""), "quoted_price": sup_amt}]
             ctx = build_context(_project_to_dict(project), {"funding_type": project.funding_type, "project_type": project.project_type, **step1}, step2_supp, supp_suppliers, 0)
             tpl_dir = get_template_path(project.funding_type, project.project_type, step1["procurement_type"], method)
             filenames = [d.name for d in tpl_dir.glob("*.docx")]
@@ -659,12 +752,12 @@ def create_procurement(
         parent = db.query(Procurement).filter(Procurement.id == data.parent_contract_id).first()
         if not parent:
             raise HTTPException(status_code=400, detail="主合同不存在")
-        parent_winner = db.query(Supplier).filter(Supplier.procurement_id == data.parent_contract_id).order_by(Supplier.rank).first()
-        original_price = parent_winner.quoted_price or 0 if parent_winner else 0
+        parent_winner = _parent_winning_supplier_for_supplement(db, parent)
         supplement_amount = data.supplement_amount or 0
         supplement_content = data.supplement_content or step2.get("content", "")
-        total_price = original_price + supplement_amount
-        supp_ctrl = getattr(data, "supplement_control_price", None) or step2.get("supplement_control_price")
+        supp_ctrl = getattr(data, "supplement_control_price", None)
+        if supp_ctrl is None and isinstance(step2, dict):
+            supp_ctrl = step2.get("supplement_control_price")
         if supp_ctrl is not None and supp_ctrl != "" and str(supp_ctrl).strip() != "/":
             try:
                 ctrl_val = float(supp_ctrl)
@@ -684,16 +777,16 @@ def create_procurement(
         contract_num = f"{parent.contract_number}-补{supp_seq}"
         sign_date_val = step2.get("sign_date", "") or ""
         _validate_supplement_sign_dates(db, data.parent_contract_id, sign_date_val, new_seq=supp_seq)
-        form_data_str = str({**step2, "_time_records": [{"flow_name": r.get("flow_name", ""), "date_val": r.get("date_val", "")} for r in data.time_records]})
+        form_data_str = _form_data_str_from_step2_time_records(step2, data.time_records)
         proc = Procurement(
             project_id=project.id,
             procurement_type=step1["procurement_type"],
             procurement_method=method,
             parent_contract_id=data.parent_contract_id,
-            project_name=parent.project_name or step2["procurement_project_name"],
+            project_name=step2.get("procurement_project_name") or parent.project_name or "",
             content=supplement_content,
             control_price=supplement_amount,
-            budget=round(total_price / 10000),
+            budget=round(supplement_amount / 10000) if supplement_amount else 0,
             form_data=form_data_str,
             contract_number=contract_num,
             sign_date=sign_date_val,
@@ -704,11 +797,11 @@ def create_procurement(
         db.add(Supplier(
             procurement_id=proc.id,
             supplier_name=parent_winner.supplier_name if parent_winner else s["supplier_name"],
-            contact_person=s["contact_person"],
-            contact_phone=s["contact_phone"],
-            business_scope=s.get("business_scope", ""),
-            tax_rate=s.get("tax_rate", ""),
-            quoted_price=total_price,
+            contact_person=(parent_winner.contact_person if parent_winner else None) or s["contact_person"],
+            contact_phone=(parent_winner.contact_phone if parent_winner else None) or s["contact_phone"],
+            business_scope=(parent_winner.business_scope if parent_winner else None) or s.get("business_scope", ""),
+            tax_rate=(parent_winner.tax_rate if parent_winner else None) or s.get("tax_rate", ""),
+            quoted_price=supplement_amount,
             rank=1,
             is_winner=True,
         ))
@@ -723,9 +816,14 @@ def create_procurement(
                 folder_name = f"{project.project_id}-{content_safe}-补{supp_seq}"
             folder_path = PROCUREMENT_PROCESS_ROOT / f"{project.project_id} {project.project_name}" / folder_name
             folder_path.mkdir(parents=True, exist_ok=True)
-            supp_control = getattr(data, "supplement_control_price", None) or supplement_amount
+            supp_control = 0.0
+            if supp_ctrl is not None and supp_ctrl != "" and str(supp_ctrl).strip() != "/":
+                try:
+                    supp_control = float(supp_ctrl)
+                except (ValueError, TypeError):
+                    supp_control = 0.0
             step2_supp = {**step2, "content": supplement_content, "control_price": supp_control, "project_name": parent.project_name or step2.get("procurement_project_name", "")}
-            supp_suppliers = [{"supplier_name": parent_winner.supplier_name if parent_winner else s["supplier_name"], "contact_person": s["contact_person"], "contact_phone": s["contact_phone"], "business_scope": s.get("business_scope", ""), "tax_rate": s.get("tax_rate", ""), "quoted_price": total_price}]
+            supp_suppliers = [{"supplier_name": parent_winner.supplier_name if parent_winner else s["supplier_name"], "contact_person": s["contact_person"], "contact_phone": s["contact_phone"], "business_scope": s.get("business_scope", ""), "tax_rate": s.get("tax_rate", ""), "quoted_price": supplement_amount}]
             ctx = build_context(_project_to_dict(project), {"funding_type": project.funding_type, "project_type": project.project_type, **step1}, step2_supp, supp_suppliers, 0)
             tpl_dir = get_template_path(project.funding_type, project.project_type, step1["procurement_type"], method)
             filenames = [d.name for d in tpl_dir.glob("*.docx")]
@@ -748,7 +846,7 @@ def create_procurement(
             contract_num = generate_contract_number(project, step1["procurement_type"], seq)
         else:
             contract_num = "草稿"
-        form_data_str = str({**step2, "_time_records": [{"flow_name": r.get("flow_name", ""), "date_val": r.get("date_val", "")} for r in data.time_records]})
+        form_data_str = _form_data_str_from_step2_time_records(step2, data.time_records)
         proc = Procurement(
             project_id=project.id,
             procurement_type=step1["procurement_type"],
@@ -840,16 +938,10 @@ def update_procurement(
         if "suppliers" in dump and dump["suppliers"] is not None:
             db.query(Supplier).filter(Supplier.procurement_id == proc.id).delete()
             supp_amount = dump.get("supplement_amount") or 0
-            total_price = 0
-            if proc.parent_contract_id:
-                parent_winner = db.query(Supplier).filter(
-                    Supplier.procurement_id == proc.parent_contract_id
-                ).order_by(Supplier.rank).first()
-                total_price = (parent_winner.quoted_price or 0) + supp_amount if parent_winner else supp_amount
             _draft_supp = dump["suppliers"]
             _draft_sorted = sorted(_draft_supp, key=lambda s: float(s.get("quoted_price") or 0) if s.get("quoted_price") not in (None, "") else float("inf"))
             for i, s in enumerate(_draft_sorted, 1):
-                qp = total_price if proc.parent_contract_id and i == 1 else s.get("quoted_price", 0)
+                qp = supp_amount if proc.procurement_method == "补充协议" and proc.parent_contract_id and i == 1 else s.get("quoted_price", 0)
                 db.add(Supplier(
                     procurement_id=proc.id,
                     supplier_name=s.get("supplier_name", ""),
@@ -909,6 +1001,10 @@ def update_procurement(
                                 sib = _find_dual_sibling(db, proc)
                                 if sib:
                                     sib.sign_date = proc.sign_date
+                        if proc.procurement_method == "补充协议":
+                            pjn = fd.get("procurement_project_name")
+                            if pjn is not None and str(pjn).strip() != "":
+                                proc.project_name = str(pjn).strip()
                         if proc.procurement_method != "补充协议" and "control_price" in fd:
                             ctrl_val = fd.get("control_price")
                             proc.control_price = float(ctrl_val) if ctrl_val is not None and ctrl_val != "" else None
@@ -958,12 +1054,6 @@ def update_procurement(
                 _validate_quoted_price_vs_control(v, ctrl_f, proc.procurement_method)
             db.query(Supplier).filter(Supplier.procurement_id == proc.id).delete()
             supp_amount = dump.get("supplement_amount") or 0
-            total_price = 0
-            if proc.parent_contract_id:
-                parent_winner = db.query(Supplier).filter(
-                    Supplier.procurement_id == proc.parent_contract_id
-                ).order_by(Supplier.rank).first()
-                total_price = (parent_winner.quoted_price or 0) + supp_amount if parent_winner else supp_amount
             # 询比/单源/五选二：按报价升序排序，中标列随供应商变更同步
             def _qp_key(s):
                 q = s.get("quoted_price")
@@ -976,7 +1066,7 @@ def update_procurement(
             sorted_v = sorted(v, key=_qp_key)
             sect = "一标段" if proc.procurement_method == "五选二" and proc.contract_section == "一标段" else None
             for i, s in enumerate(sorted_v, 1):
-                qp = total_price if proc.parent_contract_id and i == 1 else s.get("quoted_price", 0)
+                qp = supp_amount if proc.procurement_method == "补充协议" and proc.parent_contract_id and i == 1 else s.get("quoted_price", 0)
                 is_win = (i == 1) if proc.procurement_method != "五选二" else (i == 1 and sect == "一标段") or (i == 2 and sect != "一标段")
                 sup = Supplier(
                     procurement_id=proc.id,
@@ -1090,12 +1180,14 @@ def update_procurement(
                 step2.setdefault("project_number", project.project_number or "")
                 step2.setdefault("project_id", project.project_id or "")
                 step2.setdefault("construction_unit", project.construction_unit or "")
+                step2.setdefault("construction_contact_person", getattr(project, "construction_contact_person", None) or "")
+                step2.setdefault("construction_contact_phone", getattr(project, "construction_contact_phone", None) or "")
                 step2.setdefault("total_contract_price", project.total_contract_price or 0)
                 step2.setdefault("project_address", project.project_address or "")
                 step2.setdefault("department", project.department or "")
                 step2.setdefault("site_manager", project.site_manager or "")
                 step2.setdefault("site_manager_phone", project.site_manager_phone or "")
-            time_records = (step2.get("_time_records", []) or []) if isinstance(step2, dict) else []
+            time_records = _time_records_for_mulu(step2) if isinstance(step2, dict) else []
             suppliers_data = [
                 {"supplier_name": s.supplier_name, "contact_person": s.contact_person, "contact_phone": s.contact_phone,
                  "business_scope": s.business_scope or "", "tax_rate": s.tax_rate or "", "quoted_price": s.quoted_price or 0}

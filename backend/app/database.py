@@ -53,6 +53,19 @@ def run_migrations():
             conn.commit()
     except Exception:
         pass
+    for stmt in [
+        "ALTER TABLE t_project ADD COLUMN construction_contact_person VARCHAR(100)",
+        "ALTER TABLE t_project ADD COLUMN construction_contact_phone VARCHAR(100)",
+        "ALTER TABLE t_ledger ADD COLUMN supplier_contact_person VARCHAR(100)",
+        "ALTER TABLE t_ledger ADD COLUMN supplier_contact_phone VARCHAR(100)",
+        "ALTER TABLE t_ledger ADD COLUMN other_participants TEXT",
+    ]:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(stmt))
+                conn.commit()
+        except Exception:
+            pass
 
 
 def get_db():

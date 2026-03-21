@@ -12,8 +12,8 @@ from app.models.file import File
 from app.config import PROCUREMENT_PROCESS_ROOT, ARCHIVED_FILE_ROOT
 from pathlib import Path
 
-# 合同编号规则：材料采购 材X，设备采购 设备X，机械租赁 机械X（PRD 8.3）
-PROC_TYPE_CODE = {"材料采购": "材", "设备采购": "设备", "机械租赁": "机械"}
+# 合同编号规则：材料采购/材料租赁 共用 材X 序号池；设备采购 设备X；机械租赁 机械X（PRD 8.3）
+PROC_TYPE_CODE = {"材料采购": "材", "材料租赁": "材", "设备采购": "设备", "机械租赁": "机械"}
 
 
 def get_next_contract_seq(db: Session, project_id: int, proc_type: str) -> int:
@@ -84,6 +84,9 @@ def create_ledger_record(
         officer=project.procurement_officers,
         funding_type=project.funding_type,
         parent_contract_number=parent_contract_number or "",
+        supplier_contact_person="",
+        supplier_contact_phone="",
+        other_participants="/",
         create_time=datetime.now(),
     )
     db.add(ledger)
@@ -289,6 +292,66 @@ def _suppliers_sorted_by_price(suppliers: list) -> list:
     )
 
 
+def _format_other_participants(
+    procurement: Procurement, sorted_suppliers: list, dual_rank_idx: int | None
+) -> str:
+    """其余参与方：邀请询比为除最低价中标外其余；五选二为除本标段中标位次外其余 4 家；直接/单一/补充为 /。"""
+    m = procurement.procurement_method
+    if m in ("直接采购", "单一来源", "补充协议"):
+        return "/"
+    if not sorted_suppliers:
+        return "/"
+    if m == "邀请询比":
+        others = sorted_suppliers[1:]
+        if not others:
+            return "/"
+        return "\n".join(s.supplier_name or "" for s in others)
+    if m == "五选二" and dual_rank_idx is not None:
+        ri = dual_rank_idx
+        if ri >= len(sorted_suppliers):
+            return "/"
+        others = [s for i, s in enumerate(sorted_suppliers) if i != ri]
+        others.sort(key=lambda x: (x.rank or 0))
+        return "\n".join((s.supplier_name or "") for s in others)
+    return "/"
+
+
+def compute_ledger_supplier_derived(db: Session, procurement: Procurement) -> dict:
+    """从中标规则与供应商表计算联系人、联系方式、其余参与方（与 sync 中供应商名、合同价同源）。"""
+    suppliers = db.query(Supplier).filter(Supplier.procurement_id == procurement.id).all()
+    sorted_suppliers = _suppliers_sorted_by_price(suppliers)
+    winner_row = None
+    dual_rank_idx = None
+    if procurement.procurement_method == "补充协议":
+        if procurement.parent_contract_id:
+            parent_suppliers = db.query(Supplier).filter(
+                Supplier.procurement_id == procurement.parent_contract_id
+            ).all()
+            parent = db.query(Procurement).filter(Procurement.id == procurement.parent_contract_id).first()
+            if parent_suppliers and parent:
+                psorted = _suppliers_sorted_by_price(parent_suppliers)
+                rank_idx = 1 if parent.procurement_method == "五选二" and parent.contract_section == "二标段" else 0
+                if rank_idx < len(psorted):
+                    winner_row = psorted[rank_idx]
+        if winner_row is None and suppliers:
+            winner_row = suppliers[0]
+    elif procurement.procurement_method == "五选二":
+        dual_rank_idx = 0 if procurement.contract_section == "一标段" else 1
+        if dual_rank_idx < len(sorted_suppliers):
+            winner_row = sorted_suppliers[dual_rank_idx]
+    else:
+        if sorted_suppliers:
+            winner_row = sorted_suppliers[0]
+    contact = (winner_row.contact_person or "") if winner_row else ""
+    phone = (winner_row.contact_phone or "") if winner_row else ""
+    other = _format_other_participants(procurement, sorted_suppliers, dual_rank_idx)
+    return {
+        "supplier_contact_person": contact,
+        "supplier_contact_phone": phone,
+        "other_participants": other,
+    }
+
+
 def sync_ledgers_on_procurement_update(db: Session, procurement: Procurement) -> None:
     """Sync all ledger records for this procurement when procurement info changes (PRD 8.9).
     五选二：一标段取排序第1名+成交金额1，二标段取排序第2名+成交金额2；其他方式取排序第1名+报价。"""
@@ -336,9 +399,16 @@ def sync_ledgers_on_procurement_update(db: Session, procurement: Procurement) ->
     if procurement.procurement_method == "补充协议":
         fd = _parse_form_data(procurement.form_data or "")
         supp_ctrl = fd.get("supplement_control_price")
-        ledger_control_price = float(supp_ctrl) if supp_ctrl is not None and supp_ctrl != "" else None
+        if supp_ctrl is None or supp_ctrl == "" or str(supp_ctrl).strip() == "/":
+            ledger_control_price = None
+        else:
+            try:
+                ledger_control_price = float(supp_ctrl)
+            except (ValueError, TypeError):
+                ledger_control_price = None
     else:
         ledger_control_price = procurement.control_price
+    derived = compute_ledger_supplier_derived(db, procurement)
     ledgers = db.query(Ledger).filter(Ledger.procurement_id == procurement.id).all()
     for l in ledgers:
         l.procurement_method = procurement.procurement_method
@@ -348,6 +418,9 @@ def sync_ledgers_on_procurement_update(db: Session, procurement: Procurement) ->
         l.supplier = supplier_name
         l.contract_price = contract_price
         l.sign_date = procurement.sign_date or ""
+        l.supplier_contact_person = derived["supplier_contact_person"]
+        l.supplier_contact_phone = derived["supplier_contact_phone"]
+        l.other_participants = derived["other_participants"]
 
 
 def rename_procurement_folders(

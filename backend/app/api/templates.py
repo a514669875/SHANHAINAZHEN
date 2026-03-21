@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api/templates", tags=["templates"])
 # PRD 3.6.1: 资金类别 × 工程类别 × 采购类型 × 采购方式
 FUNDING_TYPES = ["工程类", "自有资金"]
 PROJECT_TYPES = ["集团内工程", "集团外工程"]
-PROCUREMENT_TYPES = ["材料（设备）采购", "机械租赁"]
+PROCUREMENT_TYPES = ["材料（设备）采购", "材料租赁", "机械租赁"]
 PROCUREMENT_METHODS = ["单一来源", "邀请询比", "直接采购", "五选二", "补充协议"]
 
 

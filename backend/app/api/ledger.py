@@ -6,6 +6,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from io import BytesIO
 import openpyxl
+from openpyxl.styles import Alignment
 from app.database import get_db
 from app.models.ledger import Ledger
 from app.models.project import Project
@@ -13,17 +14,37 @@ from app.models.procurement import Procurement
 from app.models.supplier import Supplier
 from app.models.user import User
 from app.models.file import File
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, get_authenticated_user
 from app.services.emit_event import emit
 from app.events_schema import EventType
 from app.utils.officer import resolve_officer_names
 from app.utils.format import format_currency_two_decimals
+from app.services.procurement_service import sync_ledgers_on_procurement_update, compute_ledger_supplier_derived
 
 router = APIRouter(prefix="/api/ledger", tags=["ledger"])
 
 
+def _natural_sort_tuple(s: str) -> tuple:
+    """
+    合同编号等混有数字的字符串，按「自然序」比较，避免字典序下 材10 排在 材2 前面。
+    使用 (0, int) / (1, str) 片段元组，避免 Python 3 中 int 与 str 直接比较报错。
+    """
+    if not s:
+        return ()
+    parts = re.split(r"(\d+)", s)
+    out: list = []
+    for p in parts:
+        if p == "":
+            continue
+        if p.isdigit():
+            out.append((0, int(p)))
+        else:
+            out.append((1, p))
+    return tuple(out)
+
+
 def _ledger_sort_key(l: Ledger) -> tuple:
-    """台账排序：项目编号 → 材→设备→机械 → 主合同优先 → 补充协议紧跟主合同。"""
+    """台账排序：项目编号 → 材（材料采购与材料租赁共用材X编号）→设备→机械 → 主合同优先 → 补充协议紧跟主合同。"""
     pn = (l.project_number or "").strip()
     cn = (l.contract_number or "").strip()
     parent = (l.parent_contract_number or "").strip()
@@ -43,7 +64,8 @@ def _ledger_sort_key(l: Ledger) -> tuple:
         m = re.search(r"-补(\d+)(?:-|$)", cn)
         if m:
             supp_seq = int(m.group(1))
-    return (pn, type_order, base_cn, is_supp, supp_seq)
+    # base_cn / cn 用自然序，避免 材10 字典序小于 材2
+    return (pn, type_order, _natural_sort_tuple(base_cn), is_supp, supp_seq, _natural_sort_tuple(cn))
 
 
 def _sync_supplement_contracts_display(db: Session, ledger: Ledger) -> str:
@@ -76,7 +98,7 @@ def _apply_ledger_order(q, sort_by: str, sort_order: str):
 def list_ledger(
     keyword: str = Query(""),
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page_size: int = Query(0, ge=0, le=50000, description="0=不分页返回全部"),
     sort_by: str = Query("", description="排序字段：contract_price/sign_date/create_time"),
     sort_order: str = Query("ascending", description="ascending/descending"),
     funding_type: str = Query("", description="筛选资金类别：工程类/自有资金"),
@@ -101,13 +123,19 @@ def list_ledger(
     total = q.count()
     if sort_by and sort_by in ALLOWED_SORT_FIELDS:
         q = _apply_ledger_order(q, sort_by, sort_order)
-        items = q.offset((page - 1) * page_size).limit(page_size).all()
+        if page_size == 0:
+            items = q.all()
+        else:
+            items = q.offset((page - 1) * page_size).limit(page_size).all()
     else:
         # 默认排序：项目编号 → 材→设备→机械 → 主合同优先 → 补充协议紧跟主合同
         all_items = q.all()
         all_items.sort(key=_ledger_sort_key)
-        start = (page - 1) * page_size
-        items = all_items[start : start + page_size]
+        if page_size == 0:
+            items = all_items
+        else:
+            start = (page - 1) * page_size
+            items = all_items[start : start + page_size]
     # Build response with officer names and file preview
     result = []
     for l in items:
@@ -143,12 +171,22 @@ def list_ledger(
                 if sf:
                     url = f"/api/files/{sf.id}/content"
                 supplement_list.append({"cn": cn, "url": url})
+        proc_row = db.query(Procurement).filter(Procurement.id == l.procurement_id).first()
+        if proc_row:
+            derived = compute_ledger_supplier_derived(db, proc_row)
+            scp = (derived["supplier_contact_person"] or "").strip() or "-"
+            scph = (derived["supplier_contact_phone"] or "").strip() or "-"
+            opart = derived["other_participants"] or "/"
+        else:
+            scp, scph, opart = "-", "-", "/"
+        proc_type_str = (proc_row.procurement_type or "") if proc_row else ""
         result.append({
             "id": l.id,
             "project_id": l.project_id,
             "procurement_id": l.procurement_id,
             "seq": None,
             "group_type": l.group_type,
+            "procurement_type": proc_type_str,
             "procurement_method": l.procurement_method,
             "department": l.department,
             "project_number": l.project_number,
@@ -156,9 +194,12 @@ def list_ledger(
             "project_name": l.project_name,
             "procurement_name": l.procurement_name,
             "supplier": l.supplier,
+            "supplier_contact_person": scp,
+            "supplier_contact_phone": scph,
             "contract_price": l.contract_price,
             "sign_date": l.sign_date,
             "content": l.content,
+            "other_participants": opart,
             "control_price": l.control_price,
             "funding_source": l.funding_source,
             "officer": officer_names,
@@ -177,9 +218,9 @@ def list_ledger(
 def export_ledger(
     ids: str = Query("", description="导出的台账ID，逗号分隔；为空时返回错误"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_authenticated_user),
 ):
-    """导出选中台账。ids 为勾选的台账 ID，逗号分隔；未传或为空时返回 400。"""
+    """导出选中台账。任意已登录用户可导出（不区分角色）。ids 为勾选的台账 ID，逗号分隔；未传或为空时返回 400。"""
     if not ids or not ids.strip():
         raise HTTPException(status_code=400, detail="请先勾选要导出的台账项")
     try:
@@ -193,11 +234,12 @@ def export_ledger(
     ws = wb.active
     ws.title = "智能台账"
     headers = [
-        "序号", "资金类别", "集团内/外项目", "采购方式", "项目实施部门", "项目编号", "合同编号",
-        "工程名称", "采购项目名称", "供应商", "合同价（元）", "签订日期", "采购内容",
-        "采购控制价（元）", "资金来源", "经办人", "所属主合同", "补充协议", "录入时间"
+        "序号", "资金类别", "集团内/外项目", "采购类型", "采购方式", "项目实施部门", "项目编号", "合同编号",
+        "工程名称", "采购项目名称", "供应商", "供应商联系人", "供应商联系方式", "合同价（元）", "签订日期", "采购内容",
+        "其余参与方", "采购控制价（元）", "资金来源", "经办人", "所属主合同", "补充协议", "录入时间"
     ]
     ws.append(headers)
+    wrap_align = Alignment(wrap_text=True, vertical="top")
     for i, l in enumerate(items, 1):
         supp_str = _sync_supplement_contracts_display(db, l)
         from app.utils.format import format_date_ymd
@@ -206,13 +248,29 @@ def export_ledger(
         officer_names = resolve_officer_names(db, l.officer or "")
         contract_price_str = format_currency_two_decimals(l.contract_price) if l.contract_price is not None else "/"
         control_price_str = format_currency_two_decimals(l.control_price) if l.control_price is not None else "/"
-        ws.append([
-            i, l.funding_type or "-", l.group_type, l.procurement_method, l.department, l.project_number,
+        proc_row = db.query(Procurement).filter(Procurement.id == l.procurement_id).first()
+        if proc_row:
+            derived = compute_ledger_supplier_derived(db, proc_row)
+            ex_scp = (derived["supplier_contact_person"] or "").strip() or "-"
+            ex_scp2 = (derived["supplier_contact_phone"] or "").strip() or "-"
+            other_str = derived["other_participants"] or "/"
+        else:
+            ex_scp, ex_scp2, other_str = "-", "-", "/"
+        proc_type_excel = (proc_row.procurement_type or "") if proc_row else ""
+        row = [
+            i, l.funding_type or "-", l.group_type, proc_type_excel, l.procurement_method, l.department, l.project_number,
             l.contract_number, l.project_name, l.procurement_name, l.supplier,
+            ex_scp,
+            ex_scp2,
             contract_price_str, sign_date_str, l.content,
+            other_str,
             control_price_str, l.funding_source,
             officer_names, l.parent_contract_number or "-", supp_str, create_time_str,
-        ])
+        ]
+        ws.append(row)
+        r = ws.max_row
+        for c in (12, 13, 17):  # 供应商联系人、供应商联系方式、其余参与方
+            ws.cell(row=r, column=c).alignment = wrap_align
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -264,6 +322,7 @@ async def import_ledger_excel(
                 break
     created = 0
     created_pairs = []
+    sync_procurement_ids = set()
     for row in rows[1:]:
         if not any(row):
             continue
@@ -347,9 +406,12 @@ async def import_ledger_excel(
             project_name=project_name,
             procurement_name=procurement_name,
             supplier=supplier,
+            supplier_contact_person="",
+            supplier_contact_phone="",
             contract_price=contract_price,
             sign_date=sign_date,
             content=content,
+            other_participants="/",
             control_price=control_price,
             funding_source=funding_source,
             officer=officer,
@@ -361,6 +423,11 @@ async def import_ledger_excel(
         db.add(ledger)
         created += 1
         created_pairs.append((project.id, procurement.id))
+        sync_procurement_ids.add(procurement.id)
+    for pid in sync_procurement_ids:
+        pobj = db.query(Procurement).filter(Procurement.id == pid).first()
+        if pobj:
+            sync_ledgers_on_procurement_update(db, pobj)
     db.commit()
     for pj_id, pc_id in created_pairs:
         emit(EventType.LEDGER_CREATED, {"project_id": pj_id, "procurement_id": pc_id})

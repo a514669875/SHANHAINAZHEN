@@ -24,12 +24,6 @@
         </el-card>
       </el-col>
     </el-row>
-    <div class="quick-links">
-      <h3>快捷入口</h3>
-      <el-button type="primary" @click="$router.push('/projects')">工程项目管理</el-button>
-      <el-button @click="$router.push('/ledger')">智能台账</el-button>
-      <el-button @click="$router.push('/archive')">归档管理</el-button>
-    </div>
   </div>
 </template>
 
@@ -58,10 +52,5 @@ onMounted(async () => {
   h2 { margin-bottom: 24px; font-size: 18px; }
   .stat-value { font-size: 32px; font-weight: bold; color: #1E3A8A; }
   .stat-label { font-size: 14px; color: #6B7280; }
-  .quick-links {
-    margin-top: 32px;
-    h3 { margin-bottom: 16px; font-size: 16px; }
-    .el-button { margin-right: 12px; }
-  }
 }
 </style>

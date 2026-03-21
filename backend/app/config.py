@@ -6,7 +6,12 @@ from pathlib import Path
 # Base paths
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATABASE_DIR = BASE_DIR / "database"
-DATABASE_PATH = DATABASE_DIR / "shanhai.db"
+# 测试或独立部署时可设置环境变量 SHANHAI_DATABASE_PATH 指向其它 SQLite 文件
+if os.getenv("SHANHAI_DATABASE_PATH"):
+    DATABASE_PATH = Path(os.environ["SHANHAI_DATABASE_PATH"])
+else:
+    DATABASE_PATH = DATABASE_DIR / "shanhai.db"
+DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
 DATA_DIR = BASE_DIR / "data"
 CONFIG_FILE = DATA_DIR / "config.json"
 

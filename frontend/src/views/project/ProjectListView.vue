@@ -2,17 +2,20 @@
   <div class="project-list-view">
     <div class="page-header">
       <h2>工程项目清单</h2>
-      <el-input
-        v-model="searchKeyword"
-        placeholder="搜索工程编号/名称"
-        class="search-input"
-        clearable
-        @keyup.enter="loadData"
-      >
-        <template #prefix>
-          <el-icon><Search /></el-icon>
-        </template>
-      </el-input>
+      <div class="header-right-col">
+        <el-input
+          v-model="searchKeyword"
+          placeholder="搜索工程编号/名称"
+          class="search-input"
+          clearable
+          @keyup.enter="loadData"
+        >
+          <template #prefix>
+            <el-icon><Search /></el-icon>
+          </template>
+        </el-input>
+        <div class="table-total-above-grid">共 {{ total }} 条</div>
+      </div>
     </div>
     <div class="action-bar">
       <el-button type="primary" @click="showAdd">新增工程</el-button>
@@ -23,7 +26,7 @@
     <el-table
       :data="tableData"
       border
-      max-height="calc(100vh - 280px)"
+      max-height="calc(100vh - 200px)"
       @row-dblclick="handleRowDblClick"
       @selection-change="handleSelectionChange"
     >
@@ -40,6 +43,12 @@
       <el-table-column prop="site_manager" label="现场管理员" width="100" resizable />
       <el-table-column prop="site_manager_phone" label="联系方式" width="120" resizable />
       <el-table-column prop="construction_unit" label="发包单位" width="100" resizable />
+      <el-table-column prop="construction_contact_person" label="发包方联系人" width="110" resizable>
+        <template #default="{ row }">{{ row.construction_contact_person || '-' }}</template>
+      </el-table-column>
+      <el-table-column prop="construction_contact_phone" label="发包方联系方式" width="120" resizable>
+        <template #default="{ row }">{{ row.construction_contact_phone || '-' }}</template>
+      </el-table-column>
       <el-table-column prop="total_contract_price" label="总包合同价" width="110" resizable>
         <template #default="{ row }">{{ formatContractPrice(row.total_contract_price) }}</template>
       </el-table-column>
@@ -47,7 +56,7 @@
       <el-table-column prop="funding_source" label="资金来源" width="100" resizable />
       <el-table-column prop="procurement_officers" label="经办人" width="120" resizable>
         <template #default="{ row }">
-          <span style="white-space: pre-line">{{ getOfficerDisplay(row.procurement_officers) }}</span>
+          <span style="white-space: pre-line">{{ officerCellText(row) }}</span>
         </template>
       </el-table-column>
       <el-table-column prop="create_date" label="创建日期" width="110" resizable>
@@ -59,16 +68,6 @@
         </template>
       </el-table-column>
     </el-table>
-    </div>
-    <div class="pagination">
-      <span>共 {{ total }} 条记录</span>
-      <el-pagination
-        v-model:current-page="currentPage"
-        v-model:page-size="pageSize"
-        :total="total"
-        :page-sizes="[10, 20, 50]"
-        layout="prev, pager, next, jumper, sizes"
-      />
     </div>
     <p class="tip">双击工程项可进入该工程的采购项目清单</p>
 
@@ -133,6 +132,18 @@
             </el-form-item>
           </el-col>
         </el-row>
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="发包方联系人">
+              <el-input v-model="form.construction_contact_person" placeholder="非必填" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="发包方联系方式">
+              <el-input v-model="form.construction_contact_phone" placeholder="非必填" />
+            </el-form-item>
+          </el-col>
+        </el-row>
         <el-divider content-position="left">合同信息</el-divider>
         <el-row :gutter="16">
           <el-col :span="12">
@@ -168,6 +179,7 @@
             multiple
             placeholder="选择经办人"
             style="width: 100%"
+            :disabled="officerSelfOnly"
           >
             <el-option
               v-for="u in userList"
@@ -176,6 +188,9 @@
               :value="String(u.id)"
             />
           </el-select>
+          <p v-if="officerSelfOnly" class="officer-hint">
+            采购管理员仅可将本人设为经办人；编辑保存时不会修改已有工程的经办人列表。
+          </p>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -203,12 +218,14 @@ import type { Project, ProjectCreate } from '@/api/projects'
 import { formatDateYMD, formatNumericLocale, formatContractPrice } from '@/utils/format'
 import NumericInput from '@/components/NumericInput.vue'
 import { useRealtimeSync, EventType } from '@/composables/useRealtimeSync'
+import { useUserStore } from '@/store/user'
 
 const router = useRouter()
+const userStore = useUserStore()
+/** 采购管理员：新建仅能选自己；更新时不提交经办人字段以免覆盖管理员配置的多经办人 */
+const officerSelfOnly = computed(() => userStore.user?.role === '采购管理员')
 const tableData = ref<Project[]>([])
 const total = ref(0)
-const currentPage = ref(1)
-const pageSize = ref(20)
 const searchKeyword = ref('')
 const selectedIds = ref<number[]>([])
 const dialogVisible = ref(false)
@@ -228,6 +245,13 @@ function getOfficerDisplay(ids: string | undefined) {
   if (!ids) return '-'
   return ids.split(',').map((id) => officerDisplayMap.value[id.trim()] || id).filter(Boolean).join('\n')
 }
+/** 优先使用后端解析的姓名（采购管理员等无法拉全量用户列表时仍正确显示） */
+function officerCellText(row: Project) {
+  const d = (row as Project & { procurement_officer_display?: string }).procurement_officer_display
+  if (d != null && String(d).trim() !== '') return d
+  const fromIds = getOfficerDisplay(row.procurement_officers)
+  return fromIds === '-' && row.procurement_officers ? row.procurement_officers : fromIds
+}
 const form = reactive<ProjectCreate & { project_address?: string; project_duration?: string }>({
   funding_type: '工程类',
   project_type: '集团内项目',
@@ -238,6 +262,8 @@ const form = reactive<ProjectCreate & { project_address?: string; project_durati
   site_manager: '',
   site_manager_phone: '',
   construction_unit: '',
+  construction_contact_person: '',
+  construction_contact_phone: '',
   total_contract_price: 0,
   project_duration: '',
   funding_source: '自有资金',
@@ -288,15 +314,15 @@ onMounted(() => {
   loadUsers()
 })
 
-watch([currentPage, pageSize, searchKeyword], () => loadData())
+watch([searchKeyword], () => loadData())
 
 async function loadData() {
   try {
     const [items, countRes] = await Promise.all([
       listProjects({
         keyword: searchKeyword.value,
-        page: currentPage.value,
-        page_size: pageSize.value,
+        page: 1,
+        page_size: 0,
       }),
       countProjects(searchKeyword.value),
     ])
@@ -335,13 +361,18 @@ function showAdd() {
     site_manager: '',
     site_manager_phone: '',
     construction_unit: '',
+    construction_contact_person: '',
+    construction_contact_phone: '',
     total_contract_price: 0,
     project_duration: '',
     funding_source: '自有资金',
     project_address: '',
     procurement_officers: '',
   })
-  officerIds.value = []
+  officerIds.value =
+    officerSelfOnly.value && userStore.user?.id != null
+      ? [String(userStore.user.id)]
+      : []
   dialogVisible.value = true
 }
 
@@ -362,7 +393,12 @@ async function saveProject() {
     if (!valid) return
     try {
       if (editingId.value) {
-        await updateProject(editingId.value, form)
+        if (officerSelfOnly.value) {
+          const { procurement_officers: _po, ...rest } = form
+          await updateProject(editingId.value, rest)
+        } else {
+          await updateProject(editingId.value, form)
+        }
         ElMessage.success('更新成功')
       } else {
         await createProject(form)
@@ -377,9 +413,13 @@ async function saveProject() {
 }
 
 async function handleBatchDelete() {
-  await ElMessageBox.confirm(`确定删除选中的 ${selectedIds.value.length} 项？`, '确认', {
-    type: 'warning',
-  })
+  await ElMessageBox.confirm(
+    `确定删除选中的 ${selectedIds.value.length} 项？\n若某工程下仍有采购项目，将无法删除并会提示原因。`,
+    '删除确认',
+    {
+      type: 'warning',
+    },
+  )
   try {
     for (const id of selectedIds.value) {
       await deleteProject(id)
@@ -416,10 +456,21 @@ async function handleExport() {
   .page-header {
     display: flex;
     justify-content: space-between;
-    align-items: center;
+    align-items: flex-start;
     margin-bottom: 16px;
     h2 {
       font-size: 18px;
+    }
+    .header-right-col {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 6px;
+    }
+    .table-total-above-grid {
+      font-size: 14px;
+      color: var(--el-text-color-regular);
+      line-height: 1.4;
     }
     .search-input {
       width: 240px;
@@ -428,16 +479,16 @@ async function handleExport() {
   .action-bar {
     margin-bottom: 16px;
   }
-  .pagination {
-    margin-top: 16px;
-    display: flex;
-    align-items: center;
-    gap: 16px;
-  }
   .tip {
     margin-top: 8px;
     font-size: 12px;
     color: #6B7280;
+  }
+  .officer-hint {
+    margin: 6px 0 0;
+    font-size: 12px;
+    color: var(--el-text-color-secondary);
+    line-height: 1.4;
   }
   .table-scroll-wrapper {
     overflow-x: auto;
