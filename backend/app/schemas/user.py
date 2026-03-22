@@ -1,5 +1,5 @@
 """User schemas."""
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 
@@ -11,8 +11,6 @@ class UserBase(BaseModel):
     phone: Optional[str] = None
     email: Optional[str] = None
     computer_name: Optional[str] = None
-    computer_ip: Optional[str] = None
-    file_share_path: Optional[str] = None
 
 
 class UserCreate(UserBase):
@@ -25,9 +23,11 @@ class UserUpdate(BaseModel):
     phone: Optional[str] = None
     email: Optional[str] = None
     computer_name: Optional[str] = None
-    computer_ip: Optional[str] = None
-    file_share_path: Optional[str] = None
     is_active: Optional[bool] = None
+    password: Optional[str] = Field(
+        default=None,
+        description="新密码；不传或空字符串表示不修改",
+    )
 
 
 class UserResponse(UserBase):

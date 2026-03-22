@@ -1,9 +1,9 @@
-"""File API - upload, list, download (with proxy for distributed)."""
+"""File API - upload, list, download。文件均落在运行后端的机器（backend/data）。"""
 import os
 import sys
 import subprocess
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, Form, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from pathlib import Path
 from app.database import get_db
@@ -14,7 +14,6 @@ from app.models.project import Project
 from app.models.ledger import Ledger
 from app.core.auth import get_current_user
 from app.services.project_service import is_officer
-from app.services.file_proxy_service import proxy_file_from_client
 from app.services.archive_service import (
     get_temp_path,
     try_archive_and_create_ledgers,
@@ -30,6 +29,7 @@ from app.services.process_file_sync_service import (
     USER_MODIFIED,
     OUTDATED_MANUAL_MERGE_REQUIRED,
     prune_temp_versions_on_confirm,
+    apply_process_list_mtime_detection_to_row,
 )
 from app.models.process_file_sync_status import ProcessFileSyncStatus
 from app.config import ARCHIVED_FILE_ROOT, PROCUREMENT_PROCESS_ROOT
@@ -98,7 +98,10 @@ def list_process_files(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """List process files (Word) for a procurement - files in procurement专属文件夹，附带 sync_status。"""
+    """List process files (Word) for a procurement - files in procurement专属文件夹，附带 sync_status。
+
+    PRD 8.21.6：mtime 自动检测逻辑见 process_file_sync_service.apply_process_list_mtime_detection_to_row。
+    """
     proc = db.query(Procurement).filter(Procurement.id == procurement_id).first()
     if not proc:
         raise HTTPException(status_code=404, detail="采购项目不存在")
@@ -140,22 +143,15 @@ def list_process_files(
                 row = status_map.get(f.name)
                 sync_status = "SYNCED"
                 if row:
-                    sync_status = row.sync_status
-                    # 需人工合并：必须有 temp_versions 备份，否则为异常数据（如新建项目误标），按已同步处理并修正 DB
-                    if sync_status == OUTDATED_MANUAL_MERGE_REQUIRED and not _has_temp_backup(f.name):
-                        sync_status = "SYNCED"
-                        row.sync_status = "SYNCED"
-                        row.file_mtime_at_sync = current_mtime
-                        rows_to_fix.append(row)
-                    # 自动检测：文件 mtime 晚于记录值，视为用户手动修改（容差 2 秒，避免时钟/精度误判）
-                    # 必须持久化到 DB，否则表单保存时会按 SYNCED 直接覆盖，导致 temp_versions 未创建
-                    elif (
-                        sync_status == "SYNCED"
-                        and row.file_mtime_at_sync is not None
-                        and current_mtime > row.file_mtime_at_sync + 2
-                    ):
-                        sync_status = "USER_MODIFIED"
-                        row.sync_status = USER_MODIFIED
+                    before_mtime = row.file_mtime_at_sync
+                    before_status = row.sync_status
+                    sync_status = apply_process_list_mtime_detection_to_row(
+                        proc,
+                        row,
+                        current_mtime,
+                        _has_temp_backup(f.name),
+                    )
+                    if row.file_mtime_at_sync != before_mtime or row.sync_status != before_status:
                         rows_to_fix.append(row)
                 result.append({
                     "name": f.name,
@@ -514,27 +510,19 @@ def get_file_content(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Get file - proxy from client if distributed, else local."""
+    """从服务端本地归档目录读取（集中存储，不跨机拉取）。"""
     f = db.query(File).filter(File.id == file_id).first()
     if not f:
         raise HTTPException(status_code=404, detail="文件不存在")
     if not _can_read_file_content(db, current_user, f):
         raise HTTPException(status_code=403, detail="无权限查看该文件")
     local_path = ARCHIVED_FILE_ROOT / f.file_path
-    # 单机/本机开发：文件实际在后端归档目录，但库中仍带 storage_computer_ip，优先读本地避免 8001 路径不一致导致 404→500
-    if local_path.is_file():
-        return FileResponse(local_path, filename=f.file_name)
-    if f.storage_computer_ip:
-        owner = db.query(User).filter(User.id == f.owner_user_id).first()
-        port = owner.file_service_port if owner and owner.file_service_port else 8001
-        resp = proxy_file_from_client(
-            f.storage_computer_ip,
-            port,
-            f.file_path,
-            f.file_name,
+    if not local_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="文件不在服务器归档目录中，可能已被移动或删除，请联系管理员检查本机 backend/data。",
         )
-        return StreamingResponse(resp.iter_content(8192), media_type="application/octet-stream")
-    raise HTTPException(status_code=404, detail="文件不存在")
+    return FileResponse(local_path, filename=f.file_name)
 
 
 def _parse_form_bool(v) -> bool:
@@ -590,7 +578,8 @@ async def upload_file(
         is_contract=is_contract_val,
         print_mode=print_mode,
         owner_user_id=current_user.id,
-        storage_computer_ip=current_user.computer_ip or "",
+        storage_computer_ip="",
+        storage_computer_name="",
         storage_path=str(full_path),
     )
     db.add(f)

@@ -96,6 +96,73 @@ def create_ledger_record(
 PROCUREMENT_ID_FILE = ".procurement_id"
 
 
+def _read_marker_ids(marker_path: Path) -> list[int]:
+    if not marker_path.exists():
+        return []
+    try:
+        raw = marker_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return []
+    if not raw:
+        return []
+    out: list[int] = []
+    for part in raw.split(","):
+        s = part.strip()
+        if s.isdigit():
+            out.append(int(s))
+    return out
+
+
+def _write_marker_ids(folder: Path, procurement_ids: list[int]) -> None:
+    uniq: list[int] = []
+    seen = set()
+    for pid in procurement_ids:
+        if isinstance(pid, int) and pid > 0 and pid not in seen:
+            seen.add(pid)
+            uniq.append(pid)
+    if not uniq:
+        return
+    (folder / PROCUREMENT_ID_FILE).write_text(",".join(str(x) for x in uniq), encoding="utf-8")
+
+
+def add_procurement_ids_to_folder_marker(folder: Path, procurement_ids: list[int]) -> None:
+    """为已存在流程文件夹补充/写入 procurement_id 标记。"""
+    current = _read_marker_ids(folder / PROCUREMENT_ID_FILE)
+    merged = current + [pid for pid in procurement_ids if pid not in current]
+    _write_marker_ids(folder, merged)
+
+
+def _find_process_folder_by_procurement_id(project: Project, procurement_id: int) -> Path | None:
+    """通过 .procurement_id 标记定位流程文件夹（常规/五选二/草稿统一）。"""
+    base = PROCUREMENT_PROCESS_ROOT / f"{project.project_id} {project.project_name}"
+    if not base.exists():
+        return None
+    for p in sorted(base.iterdir()):
+        if not p.is_dir():
+            continue
+        ids = _read_marker_ids(p / PROCUREMENT_ID_FILE)
+        if procurement_id in ids:
+            return p
+    return None
+
+
+def _build_process_folder_base_name(project: Project, content: str, fallback_name: str) -> str:
+    c = (content or "").strip()
+    return f"{project.project_id}-{c}" if c else f"{project.project_id}-{fallback_name}"
+
+
+def _next_unique_process_folder_name(base_path: Path, base_name: str, exclude_path: Path | None = None) -> str:
+    """重名时追加 X（从2递增）：工程编号-采购内容, 工程编号-采购内容2, 工程编号-采购内容3..."""
+    candidate = base_name
+    idx = 0
+    while True:
+        p = base_path / candidate
+        if not p.exists() or (exclude_path is not None and p.resolve() == exclude_path.resolve()):
+            return candidate
+        idx += 1
+        candidate = f"{base_name}{idx + 1}"
+
+
 def get_next_draft_seq(db: Session, project_id: int) -> int:
     """获取该项目下暂存采购项目的下一个草稿序号 X，用于 工程编号-草稿X 命名。X 从 1 递增。"""
     count = db.query(Procurement).filter(
@@ -108,6 +175,20 @@ def get_next_draft_seq(db: Session, project_id: int) -> int:
 def get_process_folder_for_procurement(project: Project, proc: "Procurement", db: Optional[Session] = None) -> Path:
     """获取采购项目的流程文件专属文件夹路径。草稿使用 草稿X（通过 .procurement_id 定位）。五选二补充协议: 工程编号-采购内容-标段名-补X。"""
     base = PROCUREMENT_PROCESS_ROOT / f"{project.project_id} {project.project_name}"
+    marker_folder = _find_process_folder_by_procurement_id(project, proc.id)
+    if marker_folder:
+        return marker_folder
+    if db and proc.procurement_method == "五选二":
+        # 五选二共享文件夹；若当前为二标段且 marker 仅写在一标段，尝试通过兄弟标段定位
+        try:
+            from app.services.archive_service import find_dual_sibling
+            sibling = find_dual_sibling(db, proc)
+            if sibling:
+                sibling_folder = _find_process_folder_by_procurement_id(project, sibling.id)
+                if sibling_folder:
+                    return sibling_folder
+        except Exception:
+            pass
     if proc.is_draft or (proc.contract_number or "") == "草稿":
         folder = _find_draft_folder_for_procurement(project, proc.id)
         return folder if folder else base / f"{project.project_id}-草稿"
@@ -128,15 +209,9 @@ def get_process_folder_for_procurement(project: Project, proc: "Procurement", db
 
 def _find_draft_folder_for_procurement(project: Project, procurement_id: int) -> Path | None:
     """根据 procurement_id 查找对应的草稿文件夹（扫描 草稿1、草稿2... 中的 .procurement_id 标记）。"""
-    base = PROCUREMENT_PROCESS_ROOT / f"{project.project_id} {project.project_name}"
-    if not base.exists():
-        return None
-    target_id = str(procurement_id)
-    for p in sorted(base.iterdir()):
-        if p.is_dir() and p.name.startswith(f"{project.project_id}-草稿"):
-            marker = p / PROCUREMENT_ID_FILE
-            if marker.exists() and marker.read_text(encoding="utf-8").strip() == target_id:
-                return p
+    folder = _find_process_folder_by_procurement_id(project, procurement_id)
+    if folder and folder.name.startswith(f"{project.project_id}-草稿"):
+        return folder
     return None
 
 
@@ -147,11 +222,11 @@ def create_procurement_folder(project: Project, procurement: Procurement, conten
         seq = get_next_draft_seq(db, project.id)
         folder_name = f"{project.project_id}-草稿{seq}"
     else:
-        folder_name = f"{project.project_id}-{content}" if content else f"{project.project_id}-{procurement.project_name}"
+        base_name = _build_process_folder_base_name(project, content, procurement.project_name)
+        folder_name = _next_unique_process_folder_name(base_path, base_name)
     path = base_path / folder_name
     path.mkdir(parents=True, exist_ok=True)
-    if (procurement.is_draft or (procurement.contract_number or "") == "草稿") and db is not None:
-        (path / PROCUREMENT_ID_FILE).write_text(str(procurement.id), encoding="utf-8")
+    _write_marker_ids(path, [procurement.id])
     return path
 
 
@@ -179,9 +254,11 @@ def delete_procurement_resources(db: Session, project: Project, procurement: Pro
             if draft_folder and draft_folder.exists():
                 shutil.rmtree(draft_folder)
         else:
-            content = (procurement.content or procurement.project_name or "").strip()
-            folder_name = f"{project.project_id}-{content}" if content else f"{project.project_id}-{procurement.project_name}"
-            process_folder = base_process / folder_name
+            process_folder = _find_process_folder_by_procurement_id(project, procurement.id)
+            if process_folder is None:
+                content = (procurement.content or procurement.project_name or "").strip()
+                folder_name = f"{project.project_id}-{content}" if content else f"{project.project_id}-{procurement.project_name}"
+                process_folder = base_process / folder_name
             if process_folder.exists():
                 shutil.rmtree(process_folder)
 
@@ -437,11 +514,24 @@ def rename_procurement_folders(
     new_content = (procurement.content or procurement.project_name or "").strip()
     # 五选二：流程文件夹为 工程编号-采购内容，内容变更时需重命名
     if procurement.is_dual_contract or (procurement.procurement_method == "五选二" and procurement.contract_section):
-        old_folder = base_process / (f"{project.project_id}-{old_content}" if old_content else f"{project.project_id}-{old_project_name}")
-        new_folder = base_process / (f"{project.project_id}-{new_content}" if new_content else f"{project.project_id}-{procurement.project_name}")
+        old_folder = _find_process_folder_by_procurement_id(project, procurement.id)
+        if old_folder is None:
+            old_folder = base_process / (f"{project.project_id}-{old_content}" if old_content else f"{project.project_id}-{old_project_name}")
+        new_base = _build_process_folder_base_name(project, new_content, procurement.project_name)
+        new_folder = base_process / _next_unique_process_folder_name(base_process, new_base, exclude_path=old_folder)
         if old_folder.exists() and old_folder != new_folder:
             new_folder.parent.mkdir(parents=True, exist_ok=True)
             old_folder.rename(new_folder)
+        if db is not None and new_folder.exists():
+            ids = [procurement.id]
+            try:
+                from app.services.archive_service import find_dual_sibling
+                sibling = find_dual_sibling(db, procurement)
+                if sibling:
+                    ids.append(sibling.id)
+            except Exception:
+                pass
+            _write_marker_ids(new_folder, ids)
         return
     # Process folder (常规/补充协议)
     if not procurement.is_dual_contract:
@@ -463,18 +553,26 @@ def rename_procurement_folders(
                         new_folder = base_process / f"{project.project_id}-{content_safe}-补{supp_seq}"
                 else:
                     new_content = (procurement.content or procurement.project_name or "").strip()
-                    new_folder = base_process / (f"{project.project_id}-{new_content}" if new_content else f"{project.project_id}-{procurement.project_name}")
+                    new_base = _build_process_folder_base_name(project, new_content, procurement.project_name)
+                    new_folder = base_process / _next_unique_process_folder_name(base_process, new_base, exclude_path=old_folder)
                 if old_folder != new_folder:
                     new_folder.parent.mkdir(parents=True, exist_ok=True)
                     old_folder.rename(new_folder)
+                if db is not None and new_folder.exists():
+                    _write_marker_ids(new_folder, [procurement.id])
             return  # 草稿完成时 archive 子文件夹在归档时创建，此处无需处理
         else:
-            old_folder = base_process / (f"{project.project_id}-{old_content}" if old_content else f"{project.project_id}-{old_project_name}")
+            old_folder = _find_process_folder_by_procurement_id(project, procurement.id)
+            if old_folder is None:
+                old_folder = base_process / (f"{project.project_id}-{old_content}" if old_content else f"{project.project_id}-{old_project_name}")
             new_content = (procurement.content or procurement.project_name or "").strip()
-            new_folder = base_process / (f"{project.project_id}-{new_content}" if new_content else f"{project.project_id}-{procurement.project_name}")
+            new_base = _build_process_folder_base_name(project, new_content, procurement.project_name)
+            new_folder = base_process / _next_unique_process_folder_name(base_process, new_base, exclude_path=old_folder)
         if old_folder.exists() and old_folder != new_folder:
             new_folder.parent.mkdir(parents=True, exist_ok=True)
             old_folder.rename(new_folder)
+        if db is not None and new_folder.exists():
+            _write_marker_ids(new_folder, [procurement.id])
     # Archive subfolder (常规/补充协议)
     if not procurement.is_dual_contract and old_contract_number and procurement.contract_number:
         old_archive_sub = base_archive / old_contract_number

@@ -6,10 +6,10 @@
 
 ```
 ShanHaiNaZhen_system/
-├── backend/          # FastAPI 后端
+├── backend/          # FastAPI 后端（可选 web/dist 存放打包后的静态前端）
 ├── frontend/         # Vue 3 前端
-├── client_agent/     # 用户电脑文件服务（分布式存储）
-├── scripts/          # 部署脚本
+├── scripts/          # 部署脚本（含封装构建与 start_production）
+├── VERSION.txt       # 发版版本号（首行，供后端读取）
 └── PRDs/             # 产品需求文档
 ```
 
@@ -43,6 +43,16 @@ venv\Scripts\activate
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+若已构建前端（存在 `frontend/dist` 或 `backend/web/dist` 且含 `index.html`），**同一端口 8000** 会同时提供 **网页 + API**，可直接访问 `http://127.0.0.1:8000` 而无需再开 Vite。
+
+#### 封装 / 生产（办公室单机）
+
+1. 构建静态资源：`scripts\build_package_assets.bat`（使用 `npm run build:pack`，避免部分环境下 `vue-tsc` 异常）
+2. （推荐）同步到后端侧目录：`scripts\sync_dist_to_backend_web.bat`
+3. 启动：`scripts\start_production.bat`（监听 `0.0.0.0:8000`，局域网可访问）
+
+完整步骤、升级与备份见 **[docs/deploy-packaged.md](docs/deploy-packaged.md)**。给非开发人员看的简明步骤见 **[docs/小白操作说明.md](docs/小白操作说明.md)**。
+
 ### 3. 启动前端
 
 ```bash
@@ -64,19 +74,11 @@ npm run dev
 
 **注意**：实时同步（多窗口自动刷新）依赖后端 WebSocket。请先启动后端，否则控制台可能出现 `ws proxy socket error: ECONNRESET`，可忽略。
 
-### 4. 客户端代理（可选，分布式部署时使用）
+### 4. 文件存储（集中式）
 
-合同预览若提示「存储电脑不可达」，本机需运行 **8001** 端口的客户端服务（与主后端 **8000** 不同）。Windows 可双击 **`client_agent\run.bat`**。
-
-```bash
-cd client_agent
-python -m venv venv
-call venv\Scripts\activate.bat   # cmd 下请勿省略 .bat
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8001
-```
-
-**venv 创建卡住、Ctrl+C 无效**：多为杀毒实时扫描或云盘同步；可把 venv 建到用户目录：依次运行 **`client_agent\setup_venv_userprofile.bat`**、**`client_agent\run_user_venv.bat`**。详见 **[client_agent/README.md](client_agent/README.md)**。
+- **元数据**：SQLite 数据库，默认在 **`backend/database/shanhai.db`**（可用环境变量 `SHANHAI_DATABASE_PATH` 覆盖）。
+- **流程 Word、目录、归档与上传文件**：均在 **`backend/data`**（`procurement_process`、`archived_file` 等，可用环境变量 `PROCUREMENT_PROCESS_ROOT` / `ARCHIVED_FILE_ROOT` 覆盖）。
+- 办公室部署：**一台电脑运行 `scripts\start_production.bat`（8000）**，其他人只用浏览器访问即可。
 
 ### 5. 数据备份
 
@@ -101,7 +103,7 @@ python scripts/backup.py
 
 - 前端：Vue 3 + Element Plus + Pinia + TypeScript + Vite
 - 后端：Python FastAPI + SQLAlchemy + SQLite
-- 文件存储：本地/分布式（各用户电脑）
+- 文件存储：集中在运行后端的 **`backend/data`**（局域网浏览器访问 8000）
 
 ## 测试与试运行
 

@@ -98,6 +98,12 @@ class ProcurementCreate(BaseModel):
     is_draft: Optional[bool] = False  # 暂存草稿
 
 
+class ProcurementRemarkPatch(BaseModel):
+    """采购清单「备注」列单独保存，写入 form_data.remark。"""
+
+    remark: str = ""
+
+
 class ProcurementUpdate(BaseModel):
     """Partial update for procurement - triggers folder rename when content/project_name changes."""
     project_name: Optional[str] = None

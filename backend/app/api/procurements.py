@@ -1,4 +1,7 @@
 """Procurement API."""
+import json
+import math
+import re
 import shutil
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -13,19 +16,25 @@ from app.models.project import Project
 from app.models.procurement import Procurement
 from app.models.supplier import Supplier
 from app.models.ledger import Ledger
+from app.models.process_file_sync_status import ProcessFileSyncStatus
 from app.core.auth import get_current_user
-from app.schemas.procurement import ProcurementCreate, ProcurementUpdate
+from app.schemas.procurement import ProcurementCreate, ProcurementUpdate, ProcurementRemarkPatch
 from app.services.project_service import is_officer
-from app.services.archive_service import get_archive_contract_folder
+from app.services.archive_service import get_archive_contract_folder, find_dual_sibling as resolve_dual_sibling
 from app.services.procurement_service import (
-    get_next_contract_seq,
-    generate_contract_number,
+    add_procurement_ids_to_folder_marker,
     create_procurement_folder,
     delete_procurement_resources,
     rename_procurement_folders,
     sync_ledgers_on_procurement_update,
 )
-from app.services.process_file_sync_service import ensure_sync_status_records, get_primary_procurement_id, sync_process_files_on_form_save
+from app.services.process_file_sync_service import (
+    ensure_sync_status_records,
+    get_primary_procurement_id,
+    reset_sync_status_records_for_new_procurement,
+    snap_sync_status_mtimes_from_disk,
+    sync_process_files_on_form_save,
+)
 from app.services.word_service import get_template_path, build_context, render_docx
 from app.services.emit_event import emit
 from app.events_schema import EventType
@@ -36,7 +45,7 @@ from docx.oxml.ns import qn
 
 
 def _save_mulu_docx(folder_path, title: str, time_records: list) -> None:
-    """生成目录.docx，标题宋体四号居中。"""
+    """生成目录.docx：标题宋体四号居中；下方两列表格（流程节点 | 日期）。"""
     doc = Document()
     p = doc.add_paragraph()
     run = p.add_run(title)
@@ -44,8 +53,17 @@ def _save_mulu_docx(folder_path, title: str, time_records: list) -> None:
     run._element.rPr.rFonts.set(qn("w:eastAsia"), "宋体")
     run.font.size = Pt(14)  # 四号
     p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-    for tr in time_records:
-        doc.add_paragraph(f"{tr.get('flow_name', '')}: {tr.get('date_val', '')}")
+    tr_list = list(time_records or [])
+    n = len(tr_list)
+    table = doc.add_table(rows=max(1, 1 + n), cols=2)
+    table.style = "Table Grid"
+    h0, h1 = table.rows[0].cells[0], table.rows[0].cells[1]
+    h0.text = "流程节点"
+    h1.text = "日期"
+    for i, tr in enumerate(tr_list, start=1):
+        row = table.rows[i].cells
+        row[0].text = str(tr.get("flow_name", "") or "")
+        row[1].text = str(tr.get("date_val", "") or "")
     doc.save(folder_path / "目录.docx")
 
 
@@ -76,7 +94,6 @@ def _parse_form_data(form_data: str) -> dict:
     if not form_data:
         return {}
     try:
-        import json
         return json.loads(form_data)
     except (json.JSONDecodeError, TypeError):
         try:
@@ -84,6 +101,23 @@ def _parse_form_data(form_data: str) -> dict:
             return ast.literal_eval(form_data) if form_data else {}
         except Exception:
             return {}
+
+
+def _extract_remark(form_data: str | None) -> str:
+    """从 form_data 读取备注（采购清单列）。"""
+    d = _parse_form_data(form_data or "")
+    if not isinstance(d, dict):
+        return ""
+    return str(d.get("remark") or "").strip()
+
+
+def _merge_remark_into_form_data(form_data: str | None, remark: str) -> str:
+    """将备注写入 form_data，保留其余字段。"""
+    d = _parse_form_data(form_data or "")
+    if not isinstance(d, dict):
+        d = {}
+    d = {**d, "remark": (remark or "").strip()}
+    return json.dumps(d, ensure_ascii=False)
 
 
 def _form_data_str_from_step2_time_records(step2: dict, time_records: list) -> str:
@@ -99,7 +133,248 @@ def _form_data_str_from_step2_time_records(step2: dict, time_records: list) -> s
             continue
         tr_out.append({"flow_name": fn, "date_val": r.get("date_val", "")})
     merged = {**step2, "_time_records": tr_out, "hetong_jiaodi": hj}
-    return str(merged)
+    # 与前端 JSON.stringify 一致，避免首次保存时与 str(dict) repr 细微差异误判为「整表变更」而重生成全套流程文件
+    return json.dumps(merged, ensure_ascii=False)
+
+
+def _form_field_values_semantically_equal(a, b) -> bool:
+    """比较表单标量：空值等价、数值宽松相等。"""
+    def _is_blank(x) -> bool:
+        return x is None or x == "" or (isinstance(x, str) and not str(x).strip())
+
+    if _is_blank(a) and _is_blank(b):
+        return True
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        try:
+            fa, fb = float(a), float(b)
+            return fa == fb or math.isclose(fa, fb, rel_tol=0, abs_tol=1e-9)
+        except (TypeError, ValueError):
+            return False
+    if isinstance(a, bool) or isinstance(b, bool):
+        return bool(a) == bool(b)
+    return a == b
+
+
+def _non_time_form_fields_equal(old_fd: dict, new_fd: dict) -> bool:
+    """除流程时间表相关字段外是否一致（用于判断是否仅更新目录.docx）。备注、空值形态、repr/JSON 差异不触发全套重生成。"""
+    _skip = frozenset({"_time_records", "hetong_jiaodi", "remark"})
+    keys = (set(old_fd.keys()) | set(new_fd.keys())) - _skip
+    for k in keys:
+        if not _form_field_values_semantically_equal(old_fd.get(k), new_fd.get(k)):
+            return False
+    return True
+
+
+def _normalize_sign_date_str(val) -> str | None:
+    """将签订日期统一为 YYYY-MM-DD 再比较，避免 2026-03-15 与 2026.3.15 误判为变更。"""
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    s = s.replace(".", "-").replace("/", "-")
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})$", s)
+    if not m:
+        return s
+    return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+
+
+def _sign_date_values_equal(a, b) -> bool:
+    if _form_field_values_semantically_equal(a, b):
+        return True
+    na, nb = _normalize_sign_date_str(a), _normalize_sign_date_str(b)
+    return na is not None and na == nb
+
+
+def _normalize_time_records_for_compare(tr) -> list:
+    """流程时间表行规范化后比较，避免空格/多余键导致首次保存误判。"""
+    if not isinstance(tr, list):
+        return []
+    out = []
+    for x in tr:
+        if not isinstance(x, dict):
+            continue
+        out.append({
+            "flow_name": str(x.get("flow_name") or "").strip(),
+            "date_val": str(x.get("date_val") or "").strip(),
+        })
+    return out
+
+
+def _is_blank_for_gain_detection(x) -> bool:
+    """判断「是否视为未填写」，用于检测补填（空→有内容）。"""
+    if x is None:
+        return True
+    if isinstance(x, str):
+        return not str(x).strip()
+    if isinstance(x, (list, dict)):
+        return len(x) == 0
+    return False
+
+
+def _form_data_gained_nonblank_content(old_fd: dict, new_fd: dict) -> bool:
+    """
+    是否存在从空到有内容的补填。若有则不可跳过流程文件同步（须重生成 Word）。
+    与 _form_payload_semantically_equal 并列使用，避免边界下语义比较漏判。
+    """
+    old_tr = _normalize_time_records_for_compare(old_fd.get("_time_records", []))
+    new_tr = _normalize_time_records_for_compare(new_fd.get("_time_records", []))
+    old_by_flow = {r["flow_name"]: r["date_val"] for r in old_tr}
+    new_by_flow = {r["flow_name"]: r["date_val"] for r in new_tr}
+    for fn, nd in new_by_flow.items():
+        od = old_by_flow.get(fn, "")
+        if _is_blank_for_gain_detection(od) and not _is_blank_for_gain_detection(nd):
+            return True
+    for fn, nd in new_by_flow.items():
+        if fn not in old_by_flow and not _is_blank_for_gain_detection(nd):
+            return True
+
+    oh, nh = old_fd.get("hetong_jiaodi"), new_fd.get("hetong_jiaodi")
+    if _is_blank_for_gain_detection(oh) and not _is_blank_for_gain_detection(nh):
+        return True
+
+    keys = set(old_fd.keys()) | set(new_fd.keys())
+    skip_root = frozenset({"_time_records", "hetong_jiaodi"})
+    for k in keys:
+        if k in skip_root:
+            continue
+        ov, nv = old_fd.get(k), new_fd.get(k)
+        if isinstance(ov, dict) and isinstance(nv, dict):
+            if _form_data_gained_nonblank_content(ov, nv):
+                return True
+            continue
+        if isinstance(ov, list) and isinstance(nv, list):
+            if not ov and nv:
+                return True
+            continue
+        if _is_blank_for_gain_detection(ov) and not _is_blank_for_gain_detection(nv):
+            return True
+    return False
+
+
+def _form_payload_semantically_equal(old_fd: dict, new_fd: dict) -> bool:
+    """整份 form_data 是否实质相同（含 _time_records 规范化、嵌套 dict 递归）。"""
+    keys = set(old_fd.keys()) | set(new_fd.keys())
+    for k in keys:
+        ov, nv = old_fd.get(k), new_fd.get(k)
+        if k == "sign_date":
+            if not _sign_date_values_equal(ov, nv):
+                return False
+            continue
+        if k == "_time_records":
+            if _normalize_time_records_for_compare(ov) != _normalize_time_records_for_compare(nv):
+                return False
+            continue
+        if isinstance(ov, dict) and isinstance(nv, dict):
+            if not _form_payload_semantically_equal(ov, nv):
+                return False
+            continue
+        if isinstance(ov, list) and isinstance(nv, list):
+            if ov != nv:
+                return False
+            continue
+        if not _form_field_values_semantically_equal(ov, nv):
+            return False
+    return True
+
+
+def _procurement_file_sync_should_skip(
+    old_form_data: str,
+    new_form_data: str | None,
+    old_suppliers: list,
+    new_suppliers: list | None,
+) -> bool:
+    """相对上次保存，表单与供应商均无实质变化时跳过流程文件同步（避免首次打开即保存也全套覆盖）。"""
+    if not new_form_data:
+        return False
+    if old_form_data == new_form_data:
+        if new_suppliers is None:
+            return True
+    old_fd = _parse_form_data(old_form_data)
+    new_fd = _parse_form_data(new_form_data)
+    if not isinstance(old_fd, dict) or not isinstance(new_fd, dict):
+        return (old_form_data or "").strip() == (new_form_data or "").strip() and new_suppliers is None
+    # 补填空字段后必须重生成流程文件，不可因语义比较漏判而跳过
+    if _form_data_gained_nonblank_content(old_fd, new_fd):
+        return False
+    if not _form_payload_semantically_equal(old_fd, new_fd):
+        return False
+    if new_suppliers is not None:
+        def _norm_orm(s):
+            return (getattr(s, "supplier_name", None), getattr(s, "quoted_price", None))
+        def _norm_dict(s):
+            return (s.get("supplier_name"), s.get("quoted_price"))
+        old_norm = [_norm_orm(s) for s in old_suppliers]
+        new_norm = [_norm_dict(s) for s in new_suppliers]
+        if old_norm != new_norm:
+            return False
+    return True
+
+
+def _overview_suppliers_payload(db: Session, proc: Procurement, suppliers: list) -> list:
+    """采购总览：五选二共 5 家报价，仅两名中标分别显示「一标段」「二标段」，其余标段留空、中标留否。其它方式按库表。"""
+    if proc.procurement_method != "五选二":
+        return [
+            {
+                "supplier_name": s.supplier_name,
+                "contact_person": s.contact_person,
+                "contact_phone": s.contact_phone,
+                "business_scope": s.business_scope or "",
+                "tax_rate": s.tax_rate or "",
+                "quoted_price": s.quoted_price or 0,
+                "is_winner": bool(s.is_winner),
+                "contract_section": s.contract_section or "",
+            }
+            for s in suppliers
+        ]
+    sibling = _find_dual_sibling(db, proc)
+    if (proc.contract_section or "") == "一标段":
+        proc_first, proc_second = proc, sibling
+    elif (proc.contract_section or "") == "二标段":
+        proc_first, proc_second = sibling, proc
+    else:
+        proc_first, proc_second = proc, sibling
+    if not proc_first:
+        proc_first = proc
+    sups_a = (
+        db.query(Supplier)
+        .filter(Supplier.procurement_id == proc_first.id)
+        .order_by(Supplier.rank)
+        .all()
+    )
+    win_a = next((x for x in sups_a if x.is_winner), None)
+    win_a_name = win_a.supplier_name if win_a else None
+    win_b_name = None
+    if proc_second:
+        win_b = (
+            db.query(Supplier)
+            .filter(
+                Supplier.procurement_id == proc_second.id,
+                Supplier.is_winner == True,  # noqa: E712
+            )
+            .first()
+        )
+        win_b_name = win_b.supplier_name if win_b else None
+    out = []
+    for s in sups_a:
+        sec, iw = "", False
+        if win_a_name and s.supplier_name == win_a_name:
+            sec, iw = "一标段", True
+        elif win_b_name and s.supplier_name == win_b_name:
+            sec, iw = "二标段", True
+        out.append(
+            {
+                "supplier_name": s.supplier_name,
+                "contact_person": s.contact_person,
+                "contact_phone": s.contact_phone,
+                "business_scope": s.business_scope or "",
+                "tax_rate": s.tax_rate or "",
+                "quoted_price": s.quoted_price or 0,
+                "is_winner": iw,
+                "contract_section": sec,
+            }
+        )
+    return out
 
 
 def _parent_winning_supplier_for_supplement(db: Session, parent: Procurement) -> Supplier | None:
@@ -144,13 +419,10 @@ def _is_time_records_only_change(
     new_fd = _parse_form_data(new_form_data)
     if not isinstance(old_fd, dict) or not isinstance(new_fd, dict):
         return False
-    _skip = ("_time_records", "hetong_jiaodi")
-    old_without = {k: v for k, v in old_fd.items() if k not in _skip}
-    new_without = {k: v for k, v in new_fd.items() if k not in _skip}
-    if old_without != new_without:
+    if not _non_time_form_fields_equal(old_fd, new_fd):
         return False
-    old_tr = old_fd.get("_time_records", [])
-    new_tr = new_fd.get("_time_records", [])
+    old_tr = _normalize_time_records_for_compare(old_fd.get("_time_records", []))
+    new_tr = _normalize_time_records_for_compare(new_fd.get("_time_records", []))
     old_hj = str(old_fd.get("hetong_jiaodi") or "").strip()
     new_hj = str(new_fd.get("hetong_jiaodi") or "").strip()
     if old_tr == new_tr and old_hj == new_hj:
@@ -169,15 +441,8 @@ def _is_time_records_only_change(
 
 
 def _find_dual_sibling(db: Session, proc: Procurement) -> Procurement | None:
-    """Find the sibling procurement for 五选二 pair (二标段)."""
-    if proc.procurement_method != "五选二":
-        return None
-    other = db.query(Procurement).filter(
-        Procurement.project_id == proc.project_id,
-        Procurement.procurement_method == "五选二",
-        Procurement.id != proc.id,
-    ).first()
-    return other
+    """Find the sibling procurement for 五选二 pair."""
+    return resolve_dual_sibling(db, proc)
 
 
 def _parse_supplement_seq(contract_number: str | None) -> int | None:
@@ -322,7 +587,7 @@ def list_procurements(
             key=lambda s: (float(s.quoted_price) if s.quoted_price is not None and s.quoted_price != "" else float("inf")),
         )
         winner = sorted_by_price[0] if sorted_by_price else None
-        remark = ""  # 备注栏不显示任何关联内容（PRD 8.8）
+        remark = _extract_remark(p.form_data)
 
         # 补充协议合同价=新增金额；控制价用 form_data.supplement_control_price（非新增金额）
         if p.procurement_method == "补充协议":
@@ -414,6 +679,35 @@ def list_procurements(
     return result
 
 
+@router.patch("/{procurement_id}/remark")
+def patch_procurement_remark(
+    procurement_id: int,
+    body: ProcurementRemarkPatch,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """更新采购清单备注（写入 form_data.remark）。"""
+    proc = db.query(Procurement).filter(Procurement.id == procurement_id).first()
+    if not proc:
+        raise HTTPException(status_code=404, detail="采购项目不存在")
+    project = db.query(Project).filter(Project.id == proc.project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    check_permission(project, current_user)
+    new_fd = _merge_remark_into_form_data(proc.form_data, body.remark)
+    proc.form_data = new_fd
+    if _is_dual_first(proc):
+        sibling = _find_dual_sibling(db, proc)
+        if sibling:
+            sibling.form_data = new_fd
+    elif _is_dual_second(proc):
+        sibling = _find_dual_sibling(db, proc)
+        if sibling:
+            sibling.form_data = new_fd
+    db.commit()
+    return {"message": "ok", "remark": (body.remark or "").strip()}
+
+
 @router.get("/{procurement_id}")
 def get_procurement(
     procurement_id: int,
@@ -428,16 +722,16 @@ def get_procurement(
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
     suppliers = db.query(Supplier).filter(Supplier.procurement_id == procurement_id).order_by(Supplier.rank).all()
-    # 五选二：保留一标段全部5家供应商供编辑；二标段中选单位在构建返回时标记 is_winner
-    winner_b_name = None
     if proc.procurement_method == "五选二":
         sibling = _find_dual_sibling(db, proc)
-        if sibling:
-            winner_b = db.query(Supplier).filter(
-                Supplier.procurement_id == sibling.id,
-                Supplier.is_winner == True,
-            ).first()
-            winner_b_name = winner_b.supplier_name if winner_b else None
+        proc_first = proc if (proc.contract_section or "") == "一标段" else sibling
+        if proc_first:
+            suppliers = (
+                db.query(Supplier)
+                .filter(Supplier.procurement_id == proc_first.id)
+                .order_by(Supplier.rank)
+                .all()
+            )
     step2 = {}
     time_records = []
     if proc.form_data:
@@ -511,19 +805,7 @@ def get_procurement(
         "contract_section": proc.contract_section,
         "parent_contract_id": proc.parent_contract_id,
         "step2": step2,
-        "suppliers": [
-            {
-                "supplier_name": s.supplier_name,
-                "contact_person": s.contact_person,
-                "contact_phone": s.contact_phone,
-                "business_scope": s.business_scope or "",
-                "tax_rate": s.tax_rate or "",
-                "quoted_price": s.quoted_price or 0,
-                "is_winner": s.is_winner or (winner_b_name is not None and s.supplier_name == winner_b_name),
-                "contract_section": s.contract_section or "",
-            }
-            for s in suppliers
-        ],
+        "suppliers": _overview_suppliers_payload(db, proc, suppliers),
         "time_records": time_records,
     }
 
@@ -598,7 +880,6 @@ def create_procurement(
 
     if method == "五选二" and not is_draft:
         # Create two procurements
-        seq = get_next_contract_seq(db, project.id, step1["procurement_type"])
         form_data_str = _form_data_str_from_step2_time_records(step2, data.time_records)
         proc_a = Procurement(
             project_id=project.id,
@@ -611,7 +892,7 @@ def create_procurement(
             form_data=form_data_str,
             is_dual_contract=True,
             contract_section="一标段",
-            contract_number=generate_contract_number(project, step1["procurement_type"], seq),
+            contract_number="",
             sign_date=step2.get("sign_date", ""),
         )
         proc_b = Procurement(
@@ -625,7 +906,7 @@ def create_procurement(
             form_data=form_data_str,
             is_dual_contract=True,
             contract_section="二标段",
-            contract_number=generate_contract_number(project, step1["procurement_type"], seq + 1),
+            contract_number="",
             sign_date=step2.get("sign_date", ""),
         )
         db.add(proc_a)
@@ -654,6 +935,7 @@ def create_procurement(
         # 五选二：创建采购项目专属文件夹（不分标段）并生成 Word 流程文件
         try:
             folder = create_procurement_folder(project, proc_a, step2.get("content") or step2.get("procurement_project_name") or "")
+            add_procurement_ids_to_folder_marker(folder, [proc_a.id, proc_b.id])
             from app.services.word_service import _project_to_dict, build_context, get_template_path, render_docx
             ctx = build_context(
                 _project_to_dict(project),
@@ -666,12 +948,17 @@ def create_procurement(
                 render_docx(docx, ctx, folder / docx.name)
             title = f"{project.project_id}{project.project_name or ''}{step2.get('content', '')}"
             _save_mulu_docx(folder, title, data.time_records)
+            reset_sync_status_records_for_new_procurement(db, proc_a.id)
             ensure_sync_status_records(db, proc_a.id, filenames + ["目录.docx"], folder)
         except Exception as e:
             logger.exception("五选二流程文件生成失败: %s", e)
             raise HTTPException(status_code=500, detail=f"流程文件生成失败: {str(e)}")
 
         db.commit()
+        try:
+            snap_sync_status_mtimes_from_disk(db, proc_a.id, folder)
+        except Exception as e:
+            logger.warning("五选二流程文件 mtime 提交后快照失败: %s", e)
         for pid in [proc_a.id, proc_b.id]:
             emit(EventType.PROCUREMENT_CREATED, {"project_id": project.id, "procurement_id": pid})
         return {"message": "ok", "procurement_ids": [proc_a.id, proc_b.id]}
@@ -739,11 +1026,16 @@ def create_procurement(
             supp_seq = len(parent_contracts)
             title = f"{project.project_id}{project.project_name or ''}{supplement_content or '补充协议'}补充协议{supp_seq}"
             _save_mulu_docx(folder_path, title, data.time_records)
+            reset_sync_status_records_for_new_procurement(db, proc.id)
             ensure_sync_status_records(db, proc.id, filenames + ["目录.docx"], folder_path)
         except Exception as e:
             logger.exception("补充协议暂存流程文件生成失败: %s", e)
             raise HTTPException(status_code=500, detail=f"流程文件生成失败: {str(e)}")
         db.commit()
+        try:
+            snap_sync_status_mtimes_from_disk(db, proc.id, folder_path)
+        except Exception as e:
+            logger.warning("补充协议暂存 mtime 提交后快照失败: %s", e)
         db.refresh(proc)
         emit(EventType.PROCUREMENT_CREATED, {"project_id": project.id, "procurement_id": proc.id})
         return {"message": "ok", "procurement_id": proc.id}
@@ -768,13 +1060,12 @@ def create_procurement(
                     )
             except (ValueError, TypeError):
                 pass
-        # 补充协议编号: 主合同编号-补Y
+        # 补充协议编号在合同文件归档时分配（主合同号-补X）
         parent_contracts = db.query(Procurement).filter(
             Procurement.project_id == project.id,
             Procurement.parent_contract_id == data.parent_contract_id,
         ).all()
         supp_seq = len(parent_contracts) + 1
-        contract_num = f"{parent.contract_number}-补{supp_seq}"
         sign_date_val = step2.get("sign_date", "") or ""
         _validate_supplement_sign_dates(db, data.parent_contract_id, sign_date_val, new_seq=supp_seq)
         form_data_str = _form_data_str_from_step2_time_records(step2, data.time_records)
@@ -788,7 +1079,7 @@ def create_procurement(
             control_price=supplement_amount,
             budget=round(supplement_amount / 10000) if supplement_amount else 0,
             form_data=form_data_str,
-            contract_number=contract_num,
+            contract_number="",
             sign_date=sign_date_val,
         )
         db.add(proc)
@@ -831,21 +1122,22 @@ def create_procurement(
                 render_docx(docx, ctx, folder_path / docx.name)
             title = f"{project.project_id}{project.project_name or ''}{supplement_content or '补充协议'}补充协议{supp_seq}"
             _save_mulu_docx(folder_path, title, data.time_records)
+            reset_sync_status_records_for_new_procurement(db, proc.id)
             ensure_sync_status_records(db, proc.id, filenames + ["目录.docx"], folder_path)
         except Exception as e:
             logger.exception("补充协议流程文件生成失败: %s", e)
             raise HTTPException(status_code=500, detail=f"流程文件生成失败: {str(e)}")
         db.commit()
+        try:
+            snap_sync_status_mtimes_from_disk(db, proc.id, folder_path)
+        except Exception as e:
+            logger.warning("补充协议 mtime 提交后快照失败: %s", e)
         emit(EventType.PROCUREMENT_CREATED, {"project_id": project.id, "procurement_id": proc.id})
         return {"message": "ok", "procurement_id": proc.id}
 
     else:
         # Single procurement (含暂存)
-        if not is_draft:
-            seq = get_next_contract_seq(db, project.id, step1["procurement_type"])
-            contract_num = generate_contract_number(project, step1["procurement_type"], seq)
-        else:
-            contract_num = "草稿"
+        contract_num = "草稿" if is_draft else ""
         form_data_str = _form_data_str_from_step2_time_records(step2, data.time_records)
         proc = Procurement(
             project_id=project.id,
@@ -892,12 +1184,17 @@ def create_procurement(
                 render_docx(docx, ctx, folder / docx.name)
             title = f"{project.project_id}{project.project_name or ''}{step2.get('content', '')}"
             _save_mulu_docx(folder, title, data.time_records)
+            reset_sync_status_records_for_new_procurement(db, proc.id)
             ensure_sync_status_records(db, proc.id, filenames + ["目录.docx"], folder)
         except Exception as e:
             logger.exception("采购项目流程文件生成失败: %s", e)
             raise HTTPException(status_code=500, detail=f"流程文件生成失败: {str(e)}")
 
         db.commit()
+        try:
+            snap_sync_status_mtimes_from_disk(db, proc.id, folder)
+        except Exception as e:
+            logger.warning("采购项目 mtime 提交后快照失败: %s", e)
         db.refresh(proc)
         emit(EventType.PROCUREMENT_CREATED, {"project_id": project.id, "procurement_id": proc.id})
         return {"message": "ok", "procurement_id": proc.id}
@@ -964,17 +1261,8 @@ def update_procurement(
 
     if proc.is_draft and dump.get("form_data") and not draft_only:
         if proc.contract_number == "草稿":
-            if proc.procurement_method == "补充协议" and proc.parent_contract_id:
-                parent = db.query(Procurement).filter(Procurement.id == proc.parent_contract_id).first()
-                if parent:
-                    parent_contracts = db.query(Procurement).filter(
-                        Procurement.project_id == proc.project_id,
-                        Procurement.parent_contract_id == proc.parent_contract_id,
-                    ).all()
-                    proc.contract_number = f"{parent.contract_number}-补{len(parent_contracts)}"
-            else:
-                seq = get_next_contract_seq(db, project.id, proc.procurement_type)
-                proc.contract_number = generate_contract_number(project, proc.procurement_type, seq)
+            # 草稿转正式时不分配合同编号；按业务规则在合同文件上传归档时分配
+            proc.contract_number = ""
         proc.is_draft = False
     for k, v in dump.items():
         if k == "form_data":
@@ -1194,13 +1482,18 @@ def update_procurement(
                 for s in db.query(Supplier).filter(Supplier.procurement_id == proc.id).order_by(Supplier.rank).all()
             ]
             new_suppliers = dump.get("suppliers") if "suppliers" in dump else None
-            time_records_only = _is_time_records_only_change(
+            if _procurement_file_sync_should_skip(
                 old_form_data, proc.form_data, old_suppliers, new_suppliers
-            )
-            sync_process_files_on_form_save(
-                db, project, proc, step1, step2, suppliers_data, time_records,
-                time_records_only=time_records_only,
-            )
+            ):
+                pass  # 无实质变更：不触碰已生成的流程 Word
+            else:
+                time_records_only = _is_time_records_only_change(
+                    old_form_data, proc.form_data, old_suppliers, new_suppliers
+                )
+                sync_process_files_on_form_save(
+                    db, project, proc, step1, step2, suppliers_data, time_records,
+                    time_records_only=time_records_only,
+                )
         except Exception as e:
             logger.exception("流程文件同步失败 procurement_id=%s: %s", proc.id, e)
     db.commit()
@@ -1247,6 +1540,9 @@ def delete_procurement(
         except Exception as e:
             logger.exception("删除采购项目资源失败 procurement_id=%s: %s", p.id, e)
             warnings.append(f"采购项目 {p.id} 关联文件夹/文件删除失败: {str(e)}")
+        db.query(ProcessFileSyncStatus).filter(
+            ProcessFileSyncStatus.procurement_id == p.id,
+        ).delete(synchronize_session=False)
         db.delete(p)
     db.commit()
     for p in to_delete:

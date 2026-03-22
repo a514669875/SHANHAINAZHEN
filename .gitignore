@@ -1,0 +1,2 @@
+# 封装产物：由 sync_dist_to_backend_web.bat 生成，可不提交
+backend/web/dist/

@@ -75,7 +75,20 @@
           <el-table-column prop="control_price" label="控制价" width="100" resizable>
             <template #default="{ row }">{{ formatContractPrice(row.control_price) }}</template>
           </el-table-column>
-          <el-table-column prop="remark" label="备注" min-width="80" width="100" resizable />
+          <el-table-column prop="remark" label="备注" min-width="140" width="180" resizable>
+            <template #default="{ row }">
+              <el-input
+                v-model="row.remark"
+                type="textarea"
+                :autosize="{ minRows: 1, maxRows: 8 }"
+                clearable
+                placeholder="可直接填写备注"
+                class="remark-input"
+                :disabled="!!remarkSavingMap[row.id]"
+                @blur="saveRemarkInline(row)"
+              />
+            </template>
+          </el-table-column>
           <el-table-column label="操作" width="100" fixed="right" :resizable="false">
             <template #default="{ row }">
               <el-button link type="primary" size="small" @click.stop="editProcurementRow(row)">编辑</el-button>
@@ -638,7 +651,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
 import { useBreadcrumbStore } from '@/store/breadcrumb'
 import { listProjects, getProject } from '@/api/projects'
-import { listProcurements, createProcurement, getProcurement, updateProcurement, deleteProcurement, getParentContractOptions } from '@/api/procurements'
+import { listProcurements, createProcurement, getProcurement, updateProcurement, updateProcurementRemark, deleteProcurement, getParentContractOptions } from '@/api/procurements'
 import request from '@/api/request'
 import { formatDateYMD, formatNumericLocale, formatContractPrice } from '@/utils/format'
 import nzhcn from 'nzh/cn'
@@ -656,6 +669,7 @@ const selectedProjectId = ref<number | null>(null)
 const project = computed(() => (selectedProjectId.value ? projects.value.find((p) => p.id === selectedProjectId.value) : null))
 const projectSelectPlaceholder = '请选择或搜索工程项目（点击输入关键词）'
 const procurements = ref<any[]>([])
+const remarkSavingMap = ref<Record<number, boolean>>({})
 
 const { updateContext } = useRealtimeSync({
   context: { project_id: selectedProjectId.value ?? undefined, scope: 'procurement_list' },
@@ -747,7 +761,31 @@ async function loadProcurements() {
     procurements.value = []
     return
   }
-  procurements.value = await listProcurements(selectedProjectId.value, true)
+  const list = await listProcurements(selectedProjectId.value, true)
+  procurements.value = (list || []).map((p: any) => ({
+    ...p,
+    remark: p.remark || '',
+    _remarkOriginal: p.remark || '',
+  }))
+}
+
+async function saveRemarkInline(row: any) {
+  if (!row?.id) return
+  const nextRemark = String(row.remark || '').trim()
+  const prevRemark = String(row._remarkOriginal || '')
+  if (nextRemark === prevRemark) return
+  try {
+    remarkSavingMap.value[row.id] = true
+    await updateProcurementRemark(row.id, nextRemark)
+    row._remarkOriginal = nextRemark
+    row.remark = nextRemark
+    ElMessage.success('备注已保存')
+  } catch (e: any) {
+    row.remark = prevRemark
+    ElMessage.error(e?.response?.data?.detail || '备注保存失败')
+  } finally {
+    remarkSavingMap.value[row.id] = false
+  }
 }
 
 async function loadProjectsForSelect(keyword: string) {
@@ -1193,7 +1231,7 @@ async function handleBatchDelete() {
     }
     ElMessage.success('已删除')
     if (allWarnings.length) ElMessage.warning(allWarnings.join('；'))
-    procurements.value = await listProcurements(project.value!.id, true)
+    await loadProcurements()
     selectedIds.value = []
     selectedProcurementForEdit.value = null
     selectedProcurementForFiles.value = null
@@ -1273,19 +1311,15 @@ const FLOW_NAMES_SUPPLEMENT = [
 const parentContractOptions = ref<any[]>([])
 const parentContractInfo = ref<{ contract_number?: string; original_price?: number; supplier_name?: string; sign_date?: string; next_supplement_seq?: number } | null>(null)
 
-const form = reactive({
-  parent_contract_id: null as number | null,
-  supplement_amount: 0,
-  supplement_content: '',
-  supplement_control_price: 0,
-  supplement_procurement_project_name: '',
-  supplement_is_dual: false,
-  contract_section: '' as string,
-  step1: {
+function createDefaultStep1() {
+  return {
     procurement_type: '材料采购',
     procurement_method: '邀请询比',
-  },
-  step2: {
+  }
+}
+
+function createDefaultStep2() {
+  return {
     procurement_type: '材料采购',
     procurement_method: '邀请询比',
     project_name: '',
@@ -1335,7 +1369,19 @@ const form = reactive({
     use_standard_contract: '是',
     passed_procurement: '是',
     reviewed: '是',
-  },
+  }
+}
+
+const form = reactive({
+  parent_contract_id: null as number | null,
+  supplement_amount: 0,
+  supplement_content: '',
+  supplement_control_price: 0,
+  supplement_procurement_project_name: '',
+  supplement_is_dual: false,
+  contract_section: '' as string,
+  step1: createDefaultStep1(),
+  step2: createDefaultStep2(),
   suppliers: [] as any[],
   time_records: [] as { flow_name: string; date_val: string }[],
 })
@@ -1655,7 +1701,7 @@ async function handleDeleteProcurement(row: any) {
     if (res?.warnings?.length) {
       ElMessage.warning(res.warnings.join('；'))
     }
-    procurements.value = await listProcurements(project.value!.id, true)
+    await loadProcurements()
   } catch (e: any) {
     if (e !== 'cancel') {
       ElMessage.error(e.response?.data?.detail || '删除失败')
@@ -1675,7 +1721,7 @@ const DATE_FIELDS = [
 function showAddProcurement() {
   editingProcurementId.value = null
   editingProcurementDetail.value = null
-  form.step1 = { procurement_type: '材料采购', procurement_method: '邀请询比' }
+  form.step1 = createDefaultStep1()
   form.parent_contract_id = null
   form.supplement_amount = 0
   form.supplement_content = ''
@@ -1684,19 +1730,7 @@ function showAddProcurement() {
   form.supplement_is_dual = false
   form.contract_section = ''
   parentContractInfo.value = null
-  form.step2.procurement_project_name = ''
-  form.step2.content = ''
-  form.step2.control_price = 0
-  form.step2.sign_date = ''
-  for (const k of DATE_FIELDS) form.step2[k] = ''
-  form.step2.leibie = '材料物资类'
-  form.step2.tax_method = '一般计税方法计算'
-  form.step2.contract_format = '采用非公司印发的合同标准文本编制'
-  form.step2.use_standard_contract = '是'
-  form.step2.passed_procurement = '是'
-  form.step2.reviewed = '是'
-  form.step2.chengjiao_jine1 = undefined
-  form.step2.chengjiao_jine2 = undefined
+  form.step2 = createDefaultStep2()
   initSuppliersByMethod()
   initTimeRecords()
   currentStep.value = 0
@@ -1726,23 +1760,92 @@ function mergedProcurementProjectName(): string {
   return (form.step2.procurement_project_name || '').trim()
 }
 
+/** 流程表行名 → 第二步年月日字段（与表单控件一致） */
+const FLOW_NAME_TO_STEP2_DATE_KEYS: Record<string, string[]> = {
+  采购意向公告: ['gonggao_year', 'gonggao_month', 'gonggao_day'],
+  意向报名截止日期: ['yixiang_baoming_jiezhi_year', 'yixiang_baoming_jiezhi_month', 'yixiang_baoming_jiezhi_day'],
+  交易文件: ['jiaoyi_fengmian_year', 'jiaoyi_fengmian_month'],
+  交易文件审核表: ['jiaoyi_wenjian_year', 'jiaoyi_wenjian_month', 'jiaoyi_wenjian_day'],
+  交易文件获取截止日期: [
+    'jiaoyi_wenjian_huoqv_jiezhi_year',
+    'jiaoyi_wenjian_huoqv_jiezhi_month',
+    'jiaoyi_wenjian_huoqv_jiezhi_day',
+  ],
+  响应文件递交截止日期: [
+    'xiangying_dijiao_jiezhi_year',
+    'xiangying_dijiao_jiezhi_month',
+    'xiangying_dijiao_jiezhi_day',
+  ],
+  合同签订: ['qianding_year', 'qianding_month', 'qianding_day'],
+}
+
+function parseFlowDateValToYmd(s: string): { y: string; m: string; d: string } {
+  let t = (s || '').trim().replace(/年/g, '.').replace(/月/g, '.').replace(/日/g, '')
+  for (const sep of ['/', '-', ' ']) {
+    t = t.split(sep).join('.')
+  }
+  const parts = t
+    .split('.')
+    .map((p) => p.trim())
+    .filter((p) => p !== '')
+  return { y: parts[0] || '', m: parts[1] || '', d: parts[2] || '' }
+}
+
+function step2DateKeysAllBlank(target: Record<string, any>, keys: string[]): boolean {
+  return keys.every((k) => {
+    const v = target[k]
+    return v == null || String(v).trim() === ''
+  })
+}
+
+/** 仅把流程表日期写入仍为空的第二步年月日，使 form_data 与 Word 占位符一致，且后端能识别「非仅 _time_records」变更 */
+function applyTimeRecordsDatesIntoBlankStep2Fields(target: Record<string, any>) {
+  for (const r of form.time_records) {
+    const keys = FLOW_NAME_TO_STEP2_DATE_KEYS[r.flow_name]
+    if (!keys?.length) continue
+    const dv = (r.date_val || '').trim()
+    if (!dv) continue
+    if (!step2DateKeysAllBlank(target, keys)) continue
+    const { y, m, d } = parseFlowDateValToYmd(dv)
+    if (!y) continue
+    if (keys.length === 2) {
+      target[keys[0]] = y
+      target[keys[1]] = m || ''
+    } else {
+      target[keys[0]] = y
+      target[keys[1]] = m || ''
+      target[keys[2]] = d || ''
+    }
+  }
+}
+
+/** 与创建时 buildPayload 写入库的 sign_date 格式一致；可传入已合并流程表日期的对象 */
+function signDateForStep2(step2: Record<string, any> = form.step2): string {
+  const y = step2.qianding_year
+  const mo = step2.qianding_month
+  const d = step2.qianding_day
+  if (y && mo && d) {
+    return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+  }
+  return step2.sign_date ?? ''
+}
+
 function buildPayload() {
-  const signDate = form.step2.qianding_year && form.step2.qianding_month && form.step2.qianding_day
-    ? `${form.step2.qianding_year}-${String(form.step2.qianding_month).padStart(2, '0')}-${String(form.step2.qianding_day).padStart(2, '0')}`
-    : form.step2.sign_date
   const procName = mergedProcurementProjectName()
+  const step2: Record<string, any> = {
+    ...form.step2,
+    procurement_project_name: procName,
+    control_price: form.step2.control_price ?? 0,
+    procurement_type: form.step1.procurement_type,
+    procurement_method: form.step1.procurement_method,
+    ...(form.step1.procurement_method === '补充协议' && { supplement_control_price: form.supplement_control_price ?? 0 }),
+  }
+  applyTimeRecordsDatesIntoBlankStep2Fields(step2)
+  step2.sign_date = signDateForStep2(step2)
   return {
     project_id: project.value.id,
     step1: { ...form.step1 },
-    step2: {
-      ...form.step2,
-      procurement_project_name: procName,
-      control_price: form.step2.control_price ?? 0,
-      sign_date: signDate,
-      procurement_type: form.step1.procurement_type,
-      procurement_method: form.step1.procurement_method,
-      ...(form.step1.procurement_method === '补充协议' && { supplement_control_price: form.supplement_control_price ?? 0 }),
-    },
+    step2,
     parent_contract_id: form.parent_contract_id || undefined,
     supplement_amount: form.supplement_amount ?? 0,
     supplement_content: form.supplement_content,
@@ -1765,20 +1868,16 @@ function hetongJiaodiFromForm(): string {
 }
 
 function buildFormDataStr() {
-  // 签订日期：优先从 qianding 年月日计算，否则用 sign_date；确保编辑后同步到台账和采购清单
-  const signDate =
-    form.step2.qianding_year && form.step2.qianding_month && form.step2.qianding_day
-      ? `${form.step2.qianding_year}.${Number(form.step2.qianding_month)}.${Number(form.step2.qianding_day)}`
-      : (form.step2.sign_date || '')
   const fullTime = form.time_records.map((r) => ({ flow_name: r.flow_name, date_val: r.date_val || '' }))
   const _time_records = fullTime.filter((r) => r.flow_name !== '合同交底')
   const base: Record<string, any> = {
     ...form.step2,
     procurement_project_name: mergedProcurementProjectName() || form.step2.procurement_project_name,
-    sign_date: signDate,
     _time_records,
     hetong_jiaodi: hetongJiaodiFromForm(),
   }
+  applyTimeRecordsDatesIntoBlankStep2Fields(base)
+  base.sign_date = signDateForStep2(base)
   if (form.step1.procurement_method === '补充协议') {
     base.content = form.supplement_content
     base.supplement_control_price = form.supplement_control_price
@@ -1889,7 +1988,7 @@ async function submitProcurement() {
       dialogVisible.value = false
       editingProcurementId.value = null
       editingProcurementDetail.value = null
-      procurements.value = await listProcurements(project.value!.id, true)
+      await loadProcurements()
       if (selectedProcurementForFiles.value?.id === updatedId) {
         loadFilesForProcurement(updatedId)
       }
@@ -1898,7 +1997,7 @@ async function submitProcurement() {
     await createProcurement(buildPayload())
     ElMessage.success('创建成功')
     dialogVisible.value = false
-    procurements.value = await listProcurements(project.value!.id, true)
+    await loadProcurements()
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail || '创建失败')
   } finally {
@@ -1995,6 +2094,13 @@ async function submitProcurement() {
     .deal-amount-row { margin-bottom: 8px; }
     .deal-amount-row:last-child { margin-bottom: 0; }
     .ml { margin-left: 24px; }
+  }
+  :deep(.remark-input .el-textarea__inner) {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    line-height: 1.4;
+    resize: none;
   }
 }
 </style>

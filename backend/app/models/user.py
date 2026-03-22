@@ -15,7 +15,7 @@ class User(Base):
     phone = Column(String(20))
     email = Column(String(100))
 
-    # Computer info for distributed file storage
+    # 历史字段（集中存储后业务不再使用，保留列兼容旧库）
     computer_name = Column(String(100))
     computer_ip = Column(String(50), index=True)
     file_service_port = Column(Integer, default=8001)

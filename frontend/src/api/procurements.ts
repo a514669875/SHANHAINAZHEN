@@ -54,6 +54,7 @@ export interface Procurement {
   supplier: string
   contract_price: number
   sign_date: string
+  remark?: string
 }
 
 export function listProcurements(projectId: number, forList = true): Promise<Procurement[]> {
@@ -86,6 +87,10 @@ export function updateProcurement(
   return request.put(`/procurements/${id}`, data, {
     params: options?.draft_only ? { draft_only: true } : undefined,
   })
+}
+
+export function updateProcurementRemark(id: number, remark: string): Promise<{ message: string; remark: string }> {
+  return request.patch(`/procurements/${id}/remark`, { remark })
 }
 
 export function deleteProcurement(id: number): Promise<{ message: string; warnings?: string[] }> {

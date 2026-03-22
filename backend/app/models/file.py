@@ -1,4 +1,4 @@
-"""File model for distributed storage."""
+"""File model。物理文件集中在运行后端的 archived_file 根目录；storage_* 字段保留兼容旧数据。"""
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
@@ -17,7 +17,7 @@ class File(Base):
     is_contract = Column(Boolean, default=False)
     print_mode = Column(String(10), default="单面")
 
-    # Distributed storage
+    # 上传者及历史字段（新上传不再写入远端 IP）
     owner_user_id = Column(Integer, ForeignKey("t_user.id"), nullable=False)
     storage_computer_ip = Column(String(50))
     storage_computer_name = Column(String(100))

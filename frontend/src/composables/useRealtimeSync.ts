@@ -2,7 +2,7 @@
  * 全链路实时同步 - WebSocket 订阅与事件消费
  * 与 PRD 8.23、development 2.4 保持一致
  */
-import { ref, onMounted, onUnmounted, type Ref } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import type { RealtimeEvent, SubscribeContext } from '@/types/event_types'
 import { EventType } from '@/types/event_types'
 

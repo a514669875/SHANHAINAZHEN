@@ -40,8 +40,6 @@ def create_user(
         phone=data.phone,
         email=data.email,
         computer_name=data.computer_name,
-        computer_ip=data.computer_ip,
-        file_share_path=data.file_share_path,
     )
     db.add(user)
     db.commit()
@@ -74,8 +72,12 @@ def update_user(
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    for k, v in data.model_dump(exclude_unset=True).items():
+    payload = data.model_dump(exclude_unset=True)
+    new_password = payload.pop("password", None)
+    for k, v in payload.items():
         setattr(user, k, v)
+    if new_password is not None and str(new_password).strip():
+        user.password_hash = get_password_hash(new_password.strip())
     db.commit()
     db.refresh(user)
     emit(EventType.USER_UPDATED, {"user_id": user.id})

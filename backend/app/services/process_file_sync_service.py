@@ -1,6 +1,14 @@
-"""流程文件同步服务 - 表单保存时更新流程文件，支持手动修改检测与合并。"""
+"""流程文件同步服务 - 表单保存时更新流程文件，支持手动修改检测与合并。
+
+与 PRD §8.21 对应关系摘要：
+- 8.21.1 / 8.21.5：SYNCED、USER_MODIFIED、OUTDATED… 及 file_mtime_at_sync
+- 8.21.2：列表接口 mtime 自动检测；本模块将「检测 + 是否写库」集中实现
+- 8.21.3：sync_process_files_on_form_save
+"""
 import shutil
 import logging
+import time
+from datetime import datetime
 from pathlib import Path
 from sqlalchemy.orm import Session
 from app.models.process_file_sync_status import ProcessFileSyncStatus
@@ -22,6 +30,101 @@ USER_MODIFIED = "USER_MODIFIED"
 OUTDATED_MANUAL_MERGE_REQUIRED = "OUTDATED_MANUAL_MERGE_REQUIRED"
 TEMP_VERSIONS_DIR = "temp_versions"
 MAX_BACKUPS = 2
+
+# ---- PRD 8.21.2 列表 mtime 检测参数（误报防护与人工修改识别的平衡）----
+MTIME_DRIFT_TOLERANCE_SEC = 2.0
+# 采购项目创建后、或同步表记录新建后一段时间内：mtime 漂移一律只刷新基线（须先于「超大漂移」判断，否则异常小的 stored 会误判）
+POST_CREATE_MTIME_RECONCILE_WINDOW_SEC = 72 * 3600
+# 仅用于「老项目」：漂移极大且已超出上述窗口时，仍判为需关注（防时钟错乱等）
+MAX_MTIME_DRIFT_BEFORE_FORCE_USER_MODIFIED_SEC = 7 * 86400
+# 小于此值的 stored 视为无效基线（脏数据/未正确写入），按缺失处理
+MIN_VALID_MTIME_SYNC_EPOCH = 946684800.0  # 2000-01-01 起算的常见 st_mtime
+
+
+def _naive_datetime(dt):
+    if dt is None:
+        return None
+    try:
+        if getattr(dt, "tzinfo", None) is not None:
+            return dt.replace(tzinfo=None)
+        return dt
+    except Exception:
+        return None
+
+
+def _in_mtime_baseline_reconcile_window(proc: Procurement, row: ProcessFileSyncStatus) -> bool:
+    """新建后短期内：杀毒/索引等导致的 mtime 变化只刷新基线（PRD 8.21.2 实现补充）。"""
+    now = datetime.utcnow()
+    ct = _naive_datetime(getattr(proc, "create_time", None))
+    if ct is not None:
+        try:
+            if (now - ct).total_seconds() <= POST_CREATE_MTIME_RECONCILE_WINDOW_SEC:
+                return True
+        except Exception:
+            pass
+    ca = _naive_datetime(getattr(row, "created_at", None))
+    if ca is not None:
+        try:
+            if (now - ca).total_seconds() <= POST_CREATE_MTIME_RECONCILE_WINDOW_SEC:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def apply_process_list_mtime_detection_to_row(
+    proc: Procurement,
+    row: ProcessFileSyncStatus,
+    current_mtime: float,
+    has_outdated_merge_backup: bool,
+) -> str:
+    """
+    PRD 8.21.2 / 8.21.6：GET process-list 时对单条 sync 记录与磁盘文件做 mtime 探测。
+    可能修改 row.sync_status、row.file_mtime_at_sync；调用方负责 db.commit。
+
+    返回前端展示的 sync_status 字符串（与 DB 中常量一致）。
+    """
+    st = row.sync_status or SYNCED
+
+    if st == OUTDATED_MANUAL_MERGE_REQUIRED:
+        if not has_outdated_merge_backup:
+            row.sync_status = SYNCED
+            row.file_mtime_at_sync = current_mtime
+            return SYNCED
+        return OUTDATED_MANUAL_MERGE_REQUIRED
+
+    if st == USER_MODIFIED:
+        return USER_MODIFIED
+
+    if st != SYNCED:
+        return st
+
+    stored = row.file_mtime_at_sync
+    if (
+        stored is None
+        or not isinstance(stored, (int, float))
+        or stored != stored  # NaN
+        or stored < MIN_VALID_MTIME_SYNC_EPOCH
+    ):
+        row.file_mtime_at_sync = current_mtime
+        return SYNCED
+
+    if current_mtime <= stored + MTIME_DRIFT_TOLERANCE_SEC:
+        return SYNCED
+
+    drift = current_mtime - stored
+
+    # 必须先于「超大漂移」：新建后 stored 异常会导致 drift 极大，否则会被误判为 USER_MODIFIED
+    if _in_mtime_baseline_reconcile_window(proc, row):
+        row.file_mtime_at_sync = current_mtime
+        return SYNCED
+
+    if drift > MAX_MTIME_DRIFT_BEFORE_FORCE_USER_MODIFIED_SEC:
+        row.sync_status = USER_MODIFIED
+        return USER_MODIFIED
+
+    row.sync_status = USER_MODIFIED
+    return USER_MODIFIED
 
 
 def _parse_form_data(form_data: str) -> dict:
@@ -48,6 +151,24 @@ def get_primary_procurement_id(db: Session, proc: Procurement) -> int:
     return proc.id
 
 
+def snap_sync_status_mtimes_from_disk(db: Session, procurement_id: int, folder_path: Path | None) -> None:
+    """
+    在 db.commit() 之后调用：再次从磁盘读取各流程文件 mtime 写回 DB。
+    避免生成后短时间内杀软/索引改写文件导致「记录偏旧」，首次 GET process-list 误判 USER_MODIFIED。
+    """
+    if folder_path is None or not folder_path.exists() or not folder_path.is_dir():
+        return
+    time.sleep(0.12)
+    rows = db.query(ProcessFileSyncStatus).filter(
+        ProcessFileSyncStatus.procurement_id == procurement_id,
+    ).all()
+    for row in rows:
+        fp = folder_path / row.filename
+        if fp.is_file():
+            row.file_mtime_at_sync = fp.stat().st_mtime
+    db.commit()
+
+
 def ensure_sync_status_records(db: Session, procurement_id: int, filenames: list, folder_path: Path = None) -> None:
     """确保每个流程文件都有 sync_status 记录，缺失则创建为 SYNCED。若提供 folder_path，同时设置 file_mtime_at_sync。"""
     primary_id = procurement_id
@@ -64,15 +185,26 @@ def ensure_sync_status_records(db: Session, procurement_id: int, filenames: list
             ))
     db.flush()
     if folder_path and folder_path.exists():
-        for fn in filenames:
-            fp = folder_path / fn
-            if fp.exists():
-                row = db.query(ProcessFileSyncStatus).filter(
-                    ProcessFileSyncStatus.procurement_id == primary_id,
-                    ProcessFileSyncStatus.filename == fn,
-                ).first()
-                if row:
-                    row.file_mtime_at_sync = fp.stat().st_mtime
+        # 两轮写入 mtime：生成刚结束时有进程可能仍在落盘，首轮与次轮间隔可减少「记录偏旧」
+        for _pass in (1, 2):
+            for fn in filenames:
+                fp = folder_path / fn
+                if fp.exists():
+                    row = db.query(ProcessFileSyncStatus).filter(
+                        ProcessFileSyncStatus.procurement_id == primary_id,
+                        ProcessFileSyncStatus.filename == fn,
+                    ).first()
+                    if row:
+                        row.file_mtime_at_sync = fp.stat().st_mtime
+            if _pass == 1:
+                time.sleep(0.15)
+
+
+def reset_sync_status_records_for_new_procurement(db: Session, procurement_id: int) -> None:
+    """新建采购项目前清空同 procurement_id 的历史状态，避免旧库残留导致新项目误显示 USER_MODIFIED。"""
+    db.query(ProcessFileSyncStatus).filter(
+        ProcessFileSyncStatus.procurement_id == procurement_id,
+    ).delete(synchronize_session=False)
 
 
 def sync_process_files_on_form_save(

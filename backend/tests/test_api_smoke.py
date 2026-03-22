@@ -14,7 +14,11 @@ from app.services.procurement_service import (
 def test_root(client: TestClient):
     r = client.get("/")
     assert r.status_code == 200
-    assert "version" in r.json()
+    ct = (r.headers.get("content-type") or "").lower()
+    if "text/html" in ct:
+        assert b"<html" in r.content.lower() or b"<!doctype html" in r.content.lower()
+    else:
+        assert "version" in r.json()
 
 
 def test_health(client: TestClient):

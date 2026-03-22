@@ -13,7 +13,6 @@
             <el-table-column prop="username" label="用户名" width="120" />
             <el-table-column prop="real_name" label="姓名" width="100" />
             <el-table-column prop="role" label="角色" width="120" />
-            <el-table-column prop="computer_ip" label="电脑IP" width="120" />
             <el-table-column prop="is_active" label="状态" width="80">
               <template #default="{ row }">
                 <el-tag :type="row.is_active ? 'success' : 'danger'">
@@ -73,8 +72,13 @@
         <el-form-item label="用户名" prop="username">
           <el-input v-model="userForm.username" :disabled="!!editingUser" />
         </el-form-item>
-        <el-form-item v-if="!editingUser" label="密码" prop="password">
-          <el-input v-model="userForm.password" type="password" show-password />
+        <el-form-item :label="editingUser ? '新密码' : '密码'" prop="password">
+          <el-input
+            v-model="userForm.password"
+            type="password"
+            show-password
+            :placeholder="editingUser ? '留空表示不修改密码' : '至少 6 位'"
+          />
         </el-form-item>
         <el-form-item label="姓名" prop="real_name">
           <el-input v-model="userForm.real_name" />
@@ -84,12 +88,6 @@
             <el-option label="采购管理员" value="采购管理员" />
             <el-option label="系统管理员" value="系统管理员" />
           </el-select>
-        </el-form-item>
-        <el-form-item label="电脑IP" prop="computer_ip">
-          <el-input v-model="userForm.computer_ip" placeholder="分布式存储时填写" />
-        </el-form-item>
-        <el-form-item label="文件路径" prop="file_share_path">
-          <el-input v-model="userForm.file_share_path" placeholder="如 D:/shanhai_files" />
         </el-form-item>
         <el-form-item v-if="editingUser" label="状态" prop="is_active">
           <el-switch v-model="userForm.is_active" />
@@ -147,20 +145,21 @@ const userForm = ref({
   password: '',
   real_name: '',
   role: '采购管理员',
-  computer_ip: '',
-  file_share_path: '',
   is_active: true,
 })
 const userRules: FormRules = {
   username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
   password: [
     {
-      required: true,
-      message: '请输入密码',
       trigger: 'blur',
       validator: (_: any, v: string, cb: (e?: Error) => void) => {
-        if (editingUser.value) return cb()
-        if (!v) return cb(new Error('请输入密码'))
+        const s = (v || '').trim()
+        if (!editingUser.value) {
+          if (!s) return cb(new Error('请输入密码'))
+          if (s.length < 6) return cb(new Error('密码至少 6 位'))
+          return cb()
+        }
+        if (s && s.length < 6) return cb(new Error('新密码至少 6 位'))
         cb()
       },
     },
@@ -227,8 +226,6 @@ function showAddUser() {
     password: '',
     real_name: '',
     role: '采购管理员',
-    computer_ip: '',
-    file_share_path: '',
     is_active: true,
   }
   userDialogVisible.value = true
@@ -241,8 +238,6 @@ function editUser(user: User) {
     password: '',
     real_name: user.real_name || '',
     role: user.role,
-    computer_ip: user.computer_ip || '',
-    file_share_path: user.file_share_path || '',
     is_active: user.is_active,
   }
   userDialogVisible.value = true
@@ -257,20 +252,18 @@ async function saveUser() {
         const data: UserUpdate = {
           real_name: userForm.value.real_name,
           role: userForm.value.role,
-          computer_ip: userForm.value.computer_ip || undefined,
-          file_share_path: userForm.value.file_share_path || undefined,
           is_active: userForm.value.is_active,
         }
+        const np = (userForm.value.password || '').trim()
+        if (np) data.password = np
         await updateUser(editingUser.value.id, data)
         ElMessage.success('更新成功')
       } else {
         const data: UserCreate = {
           username: userForm.value.username,
-          password: userForm.value.password,
+          password: userForm.value.password.trim(),
           real_name: userForm.value.real_name,
           role: userForm.value.role,
-          computer_ip: userForm.value.computer_ip || undefined,
-          file_share_path: userForm.value.file_share_path || undefined,
         }
         await createUser(data)
         ElMessage.success('创建成功')

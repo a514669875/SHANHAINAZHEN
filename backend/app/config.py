@@ -5,6 +5,33 @@ from pathlib import Path
 
 # Base paths
 BASE_DIR = Path(__file__).resolve().parent.parent
+REPO_ROOT = BASE_DIR.parent
+
+
+def get_static_dist_dir() -> Path | None:
+    """生产模式：前端构建目录（含 index.html）。未找到则返回 None，根路径仍返回 JSON API 提示。
+
+    优先级：
+    1. 环境变量 SHANHAI_STATIC_DIST（绝对或相对路径，相对 cwd）
+    2. backend/web/dist（便于「仅拷贝 backend+dist」单目录分发）
+    3. 仓库 frontend/dist（开发机 npm build 后直接 uvicorn）
+    """
+    candidates: list[Path] = []
+    env = os.getenv("SHANHAI_STATIC_DIST", "").strip()
+    if env:
+        candidates.append(Path(env))
+    candidates.append(BASE_DIR / "web" / "dist")
+    candidates.append(REPO_ROOT / "frontend" / "dist")
+    for p in candidates:
+        try:
+            resolved = p.resolve()
+        except OSError:
+            continue
+        if resolved.is_dir() and (resolved / "index.html").is_file():
+            return resolved
+    return None
+
+
 DATABASE_DIR = BASE_DIR / "database"
 # 测试或独立部署时可设置环境变量 SHANHAI_DATABASE_PATH 指向其它 SQLite 文件
 if os.getenv("SHANHAI_DATABASE_PATH"):
@@ -54,7 +81,7 @@ def set_word_templates_dir(path: str) -> None:
 # 兼容旧代码直接引用
 WORD_TEMPLATES_DIR = get_word_templates_dir()
 
-# File storage roots (PRD 7.1 - for local dev; distributed uses client paths)
+# 流程/归档根目录：默认均在运行后端的 backend/data 下（集中存储）
 PROCUREMENT_PROCESS_ROOT = Path(os.getenv("PROCUREMENT_PROCESS_ROOT", str(DATA_DIR / "procurement_process")))
 ARCHIVED_FILE_ROOT = Path(os.getenv("ARCHIVED_FILE_ROOT", str(DATA_DIR / "archived_file")))
 

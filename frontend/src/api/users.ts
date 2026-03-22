@@ -9,8 +9,6 @@ export interface UserCreate {
   phone?: string
   email?: string
   computer_name?: string
-  computer_ip?: string
-  file_share_path?: string
 }
 
 export interface UserUpdate {
@@ -19,9 +17,9 @@ export interface UserUpdate {
   phone?: string
   email?: string
   computer_name?: string
-  computer_ip?: string
-  file_share_path?: string
   is_active?: boolean
+  /** 新密码；不传或空表示不修改 */
+  password?: string
 }
 
 export function listUsers(): Promise<User[]> {

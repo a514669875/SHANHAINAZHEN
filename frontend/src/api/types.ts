@@ -6,8 +6,6 @@ export interface User {
   phone?: string
   email?: string
   computer_name?: string
-  computer_ip?: string
-  file_share_path?: string
   is_active: boolean
   create_time?: string
 }
