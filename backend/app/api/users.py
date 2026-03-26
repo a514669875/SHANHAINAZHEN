@@ -8,6 +8,7 @@ from app.core.security import get_password_hash
 from app.schemas.user import UserCreate, UserUpdate, UserResponse
 from app.services.emit_event import emit
 from app.events_schema import EventType
+from app.config import SINGLE_USER_MODE
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -17,7 +18,9 @@ def list_users(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """列出用户：系统管理员可见全部；采购管理员仅可见本人（用于工程「经办人」等下拉，且前端限制仅选自己）。"""
+    """列出用户。单人模式固定返回当前用户，保证业务下拉可用。"""
+    if SINGLE_USER_MODE:
+        return [current_user]
     if current_user.role == "系统管理员":
         return db.query(User).all()
     return [current_user]
@@ -30,6 +33,8 @@ def create_user(
     current_user: User = Depends(get_current_admin),
 ):
     """Create user (admin only)."""
+    if SINGLE_USER_MODE:
+        raise HTTPException(status_code=400, detail="单人模式下已禁用新增用户")
     if db.query(User).filter(User.username == data.username).first():
         raise HTTPException(status_code=400, detail="Username already exists")
     user = User(
@@ -55,6 +60,8 @@ def get_user(
     current_user: User = Depends(get_current_admin),
 ):
     """Get user by ID (admin only)."""
+    if SINGLE_USER_MODE and user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="User not found")
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -69,6 +76,8 @@ def update_user(
     current_user: User = Depends(get_current_admin),
 ):
     """Update user (admin only)."""
+    if SINGLE_USER_MODE and user_id != current_user.id:
+        raise HTTPException(status_code=400, detail="单人模式下仅允许维护当前账号")
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -91,6 +100,8 @@ def delete_user(
     current_user: User = Depends(get_current_admin),
 ):
     """Delete user (admin only)."""
+    if SINGLE_USER_MODE:
+        raise HTTPException(status_code=400, detail="单人模式下已禁用删除用户")
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete self")
     user = db.query(User).filter(User.id == user_id).first()

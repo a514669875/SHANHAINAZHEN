@@ -2,7 +2,7 @@
 import shutil
 from pathlib import Path
 from sqlalchemy.orm import Session
-from app.config import PROCUREMENT_PROCESS_ROOT, ARCHIVED_FILE_ROOT
+from app.config import PROCUREMENT_PROCESS_ROOT, ARCHIVED_FILE_ROOT, SINGLE_USER_MODE
 from app.models.project import Project
 
 
@@ -20,6 +20,8 @@ def delete_project_folders(project: Project) -> None:
 
 def is_officer(project: Project, user_id: int) -> bool:
     """Check if user is in procurement_officers list."""
+    if SINGLE_USER_MODE:
+        return True
     if not project.procurement_officers:
         return False
     officers = [x.strip() for x in project.procurement_officers.split(",") if x.strip()]

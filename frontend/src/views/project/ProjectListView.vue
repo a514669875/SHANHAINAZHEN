@@ -174,23 +174,7 @@
           <el-input v-model="form.project_address" />
         </el-form-item>
         <el-form-item label="材料（设备）采购经办人" prop="procurement_officers">
-          <el-select
-            v-model="officerIds"
-            multiple
-            placeholder="选择经办人"
-            style="width: 100%"
-            :disabled="officerSelfOnly"
-          >
-            <el-option
-              v-for="u in userList"
-              :key="u.id"
-              :label="u.real_name || u.username"
-              :value="String(u.id)"
-            />
-          </el-select>
-          <p v-if="officerSelfOnly" class="officer-hint">
-            采购管理员仅可将本人设为经办人；编辑保存时不会修改已有工程的经办人列表。
-          </p>
+          <el-input v-model="form.procurement_officers" placeholder="请输入经办人姓名（可多个，逗号分隔）" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -202,7 +186,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import {
@@ -213,17 +197,12 @@ import {
   deleteProject,
   exportProjectsExcel,
 } from '@/api/projects'
-import { listUsers } from '@/api/users'
 import type { Project, ProjectCreate } from '@/api/projects'
 import { formatDateYMD, formatNumericLocale, formatContractPrice } from '@/utils/format'
 import NumericInput from '@/components/NumericInput.vue'
 import { useRealtimeSync, EventType } from '@/composables/useRealtimeSync'
-import { useUserStore } from '@/store/user'
 
 const router = useRouter()
-const userStore = useUserStore()
-/** 采购管理员：新建仅能选自己；更新时不提交经办人字段以免覆盖管理员配置的多经办人 */
-const officerSelfOnly = computed(() => userStore.user?.role === '采购管理员')
 const tableData = ref<Project[]>([])
 const total = ref(0)
 const searchKeyword = ref('')
@@ -231,19 +210,9 @@ const selectedIds = ref<number[]>([])
 const dialogVisible = ref(false)
 const editingId = ref<number | null>(null)
 const formRef = ref<FormInstance>()
-const userList = ref<{ id: number; username: string; real_name?: string }[]>([])
-
-const officerIds = ref<string[]>([])
-const officerDisplayMap = computed(() => {
-  const m: Record<string, string> = {}
-  for (const u of userList.value) {
-    m[String(u.id)] = u.real_name || u.username
-  }
-  return m
-})
 function getOfficerDisplay(ids: string | undefined) {
   if (!ids) return '-'
-  return ids.split(',').map((id) => officerDisplayMap.value[id.trim()] || id).filter(Boolean).join('\n')
+  return ids.split(',').map((id) => id.trim()).filter(Boolean).join('\n')
 }
 /** 优先使用后端解析的姓名（采购管理员等无法拉全量用户列表时仍正确显示） */
 function officerCellText(row: Project) {
@@ -271,10 +240,6 @@ const form = reactive<ProjectCreate & { project_address?: string; project_durati
   procurement_officers: '',
 })
 
-watch(officerIds, (ids) => {
-  form.procurement_officers = ids.join(',')
-})
-
 watch(() => form.funding_type, (v) => {
   if (v === '自有资金') form.project_type = ''
 })
@@ -296,7 +261,7 @@ const rules: FormRules = {
   construction_unit: [{ required: true, message: '请输入发包单位', trigger: 'blur' }],
   total_contract_price: [{ required: true, message: '请输入总包合同价', trigger: 'blur' }],
   funding_source: [{ required: true, message: '请选择资金来源', trigger: 'change' }],
-  procurement_officers: [{ required: true, message: '请选择经办人', trigger: 'change' }],
+  procurement_officers: [{ required: true, message: '请输入经办人', trigger: 'blur' }],
 }
 
 useRealtimeSync({
@@ -311,7 +276,6 @@ useRealtimeSync({
 
 onMounted(() => {
   loadData()
-  loadUsers()
 })
 
 watch([searchKeyword], () => loadData())
@@ -330,14 +294,6 @@ async function loadData() {
     total.value = countRes.total
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail || '加载失败')
-  }
-}
-
-async function loadUsers() {
-  try {
-    userList.value = await listUsers()
-  } catch {
-    // ignore
   }
 }
 
@@ -369,10 +325,6 @@ function showAdd() {
     project_address: '',
     procurement_officers: '',
   })
-  officerIds.value =
-    officerSelfOnly.value && userStore.user?.id != null
-      ? [String(userStore.user.id)]
-      : []
   dialogVisible.value = true
 }
 
@@ -383,7 +335,6 @@ function editProject(row: Project) {
     project_address: row.project_address || '',
     project_duration: row.project_duration || '',
   })
-  officerIds.value = row.procurement_officers ? row.procurement_officers.split(',').filter(Boolean) : []
   dialogVisible.value = true
 }
 
@@ -393,12 +344,7 @@ async function saveProject() {
     if (!valid) return
     try {
       if (editingId.value) {
-        if (officerSelfOnly.value) {
-          const { procurement_officers: _po, ...rest } = form
-          await updateProject(editingId.value, rest)
-        } else {
-          await updateProject(editingId.value, form)
-        }
+        await updateProject(editingId.value, form)
         ElMessage.success('更新成功')
       } else {
         await createProject(form)

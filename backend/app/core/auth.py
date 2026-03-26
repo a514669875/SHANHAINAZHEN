@@ -7,14 +7,35 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
 from app.core.security import decode_token
+from app.config import SINGLE_USER_MODE
+from app.core.security import get_password_hash
 
 security = HTTPBearer(auto_error=False)
+
+
+def _get_or_create_single_user(db: Session) -> User:
+    user = db.query(User).filter(User.is_active == True).order_by(User.id.asc()).first()  # noqa: E712
+    if user:
+        return user
+    user = User(
+        username="admin",
+        password_hash=get_password_hash("admin123"),
+        role="系统管理员",
+        real_name="系统管理员",
+        is_active=True,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
 
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
 ) -> User:
+    if SINGLE_USER_MODE:
+        return _get_or_create_single_user(db)
     if not credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -45,6 +66,8 @@ async def get_current_user_optional(
     db: Session = Depends(get_db),
 ) -> Optional[User]:
     """用于 GET /auth/me：未登录或 token 无效时返回 None（HTTP 200 + null），避免无意义 401 日志与前端全局拦截误跳转。"""
+    if SINGLE_USER_MODE:
+        return _get_or_create_single_user(db)
     if not credentials:
         return None
     token = credentials.credentials
@@ -65,6 +88,8 @@ async def get_current_user_optional(
 
 
 async def get_current_admin(current_user: User = Depends(get_current_user)) -> User:
+    if SINGLE_USER_MODE:
+        return current_user
     if current_user.role != "系统管理员":
         raise HTTPException(status_code=403, detail="Admin access required")
     return current_user

@@ -887,11 +887,13 @@ async function loadFilesForProcurement(procId: number) {
 }
 
 function showUploadArchive() {
-  if (selectedProcurementForFiles.value && project.value) {
+  if (selectedProcurementForFiles.value && selectedProjectId.value) {
     router.push({
       path: '/archive',
-      query: { project_id: String(project.value.id), procurement_id: String(selectedProcurementForFiles.value.id) },
+      query: { project_id: String(selectedProjectId.value), procurement_id: String(selectedProcurementForFiles.value.id) },
     })
+  } else {
+    ElMessage.warning('请先选择工程和采购项目')
   }
 }
 
@@ -942,13 +944,14 @@ async function openProcessFileForEdit(row: { name: string }) {
       ElMessage.success('已打开文件')
       return
     }
-    await downloadProcessFile(row)
-  } catch {
-    try {
-      await downloadProcessFile(row)
-    } catch (e: any) {
-      ElMessage.error(e.response?.data?.detail || e.message || '打开失败')
+    if (data?.path) {
+      await navigator.clipboard.writeText(data.path)
+      ElMessage.warning('已复制文件路径到剪贴板，可在本地资源管理器粘贴打开')
+      return
     }
+    ElMessage.error(data?.detail || '打开失败')
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.detail || e.message || '打开失败')
   }
 }
 

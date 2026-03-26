@@ -1,9 +1,10 @@
-"""File API - upload, list, download。文件均落在运行后端的机器（backend/data）。"""
+"""File API - upload, list, download (with proxy for distributed)."""
 import os
 import sys
 import subprocess
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, Form, Query
-from fastapi.responses import FileResponse
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, Form, Query
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from pathlib import Path
 from app.database import get_db
@@ -14,6 +15,11 @@ from app.models.project import Project
 from app.models.ledger import Ledger
 from app.core.auth import get_current_user
 from app.services.project_service import is_officer
+try:
+    # 兼容：部分部署不包含分布式代理模块，缺失时自动退回本地文件读取。
+    from app.services.file_proxy_service import proxy_file_from_client
+except Exception:  # pragma: no cover
+    proxy_file_from_client = None
 from app.services.archive_service import (
     get_temp_path,
     try_archive_and_create_ledgers,
@@ -29,7 +35,6 @@ from app.services.process_file_sync_service import (
     USER_MODIFIED,
     OUTDATED_MANUAL_MERGE_REQUIRED,
     prune_temp_versions_on_confirm,
-    apply_process_list_mtime_detection_to_row,
 )
 from app.models.process_file_sync_status import ProcessFileSyncStatus
 from app.config import ARCHIVED_FILE_ROOT, PROCUREMENT_PROCESS_ROOT
@@ -37,6 +42,65 @@ from app.services.emit_event import emit
 from app.events_schema import EventType
 
 router = APIRouter(prefix="/api/files", tags=["files"])
+
+
+def _get_request_client_ip(request: Request) -> str:
+    """优先从代理头取真实客户端 IP。"""
+    xff = (request.headers.get("x-forwarded-for") or "").strip()
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    xrip = (request.headers.get("x-real-ip") or "").strip()
+    if xrip:
+        return xrip
+    if request.client and request.client.host:
+        return request.client.host.strip()
+    return ""
+
+
+def _request_allows_server_side_open(request: Request) -> bool:
+    """
+    仅在“真正本机访问”时允许后端直接调用 explorer/startfile。
+    反向代理场景中，即使 request.client 是 127.0.0.1，也会通过 host 头进一步限制。
+    """
+    host = _get_request_client_ip(request).lower()
+    if host not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+        return False
+    host_header = (request.headers.get("host") or "").split(":", 1)[0].strip().lower()
+    return host_header in ("127.0.0.1", "localhost", "::1")
+
+
+def _get_client_share_root(db: Session, current_user: User, request: Request) -> Optional[str]:
+    """获取可在客户端访问的共享根路径（UNC）。"""
+    share = (getattr(current_user, "file_share_path", None) or "").strip()
+    if share:
+        return share
+    host_ip = _get_request_client_ip(request)
+    if not host_ip:
+        return None
+    u = db.query(User).filter(
+        User.computer_ip == host_ip,
+        User.file_share_path.isnot(None),
+    ).first()
+    if not u:
+        return None
+    s = (getattr(u, "file_share_path", None) or "").strip()
+    return s or None
+
+
+def _map_server_path_to_share(server_path: Path, share_root: str, server_root: Path) -> Optional[Path]:
+    """将服务端真实路径映射为客户端可访问的 UNC 路径。"""
+    try:
+        rel = server_path.relative_to(server_root)
+    except Exception:
+        return None
+    share_root_path = Path(share_root)
+    if share_root_path.name.lower() == server_root.name.lower():
+        base = share_root_path
+    else:
+        base = share_root_path / server_root.name
+    return base / rel
 
 
 def _contract_file_for_ledger(f: File) -> bool:
@@ -98,10 +162,7 @@ def list_process_files(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """List process files (Word) for a procurement - files in procurement专属文件夹，附带 sync_status。
-
-    PRD 8.21.6：mtime 自动检测逻辑见 process_file_sync_service.apply_process_list_mtime_detection_to_row。
-    """
+    """List process files (Word) for a procurement - files in procurement专属文件夹，附带 sync_status。"""
     proc = db.query(Procurement).filter(Procurement.id == procurement_id).first()
     if not proc:
         raise HTTPException(status_code=404, detail="采购项目不存在")
@@ -143,15 +204,22 @@ def list_process_files(
                 row = status_map.get(f.name)
                 sync_status = "SYNCED"
                 if row:
-                    before_mtime = row.file_mtime_at_sync
-                    before_status = row.sync_status
-                    sync_status = apply_process_list_mtime_detection_to_row(
-                        proc,
-                        row,
-                        current_mtime,
-                        _has_temp_backup(f.name),
-                    )
-                    if row.file_mtime_at_sync != before_mtime or row.sync_status != before_status:
+                    sync_status = row.sync_status
+                    # 需人工合并：必须有 temp_versions 备份，否则为异常数据（如新建项目误标），按已同步处理并修正 DB
+                    if sync_status == OUTDATED_MANUAL_MERGE_REQUIRED and not _has_temp_backup(f.name):
+                        sync_status = "SYNCED"
+                        row.sync_status = "SYNCED"
+                        row.file_mtime_at_sync = current_mtime
+                        rows_to_fix.append(row)
+                    # 自动检测：文件 mtime 晚于记录值，视为用户手动修改（容差 2 秒，避免时钟/精度误判）
+                    # 必须持久化到 DB，否则表单保存时会按 SYNCED 直接覆盖，导致 temp_versions 未创建
+                    elif (
+                        sync_status == "SYNCED"
+                        and row.file_mtime_at_sync is not None
+                        and current_mtime > row.file_mtime_at_sync + 2
+                    ):
+                        sync_status = "USER_MODIFIED"
+                        row.sync_status = USER_MODIFIED
                         rows_to_fix.append(row)
                 result.append({
                     "name": f.name,
@@ -274,7 +342,7 @@ def open_process_file_for_edit(
         raise HTTPException(status_code=404, detail="文件不存在")
     if _open_file_in_default_app(file_path):
         return {"message": "ok"}
-    return {"message": "download", "detail": "无法直接打开，请使用下载方式"}
+    return {"message": "path", "path": str(file_path.resolve())}
 
 
 @router.delete("/process-file")
@@ -510,19 +578,29 @@ def get_file_content(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """从服务端本地归档目录读取（集中存储，不跨机拉取）。"""
+    """Get file - proxy from client if distributed, else local."""
     f = db.query(File).filter(File.id == file_id).first()
     if not f:
         raise HTTPException(status_code=404, detail="文件不存在")
     if not _can_read_file_content(db, current_user, f):
         raise HTTPException(status_code=403, detail="无权限查看该文件")
     local_path = ARCHIVED_FILE_ROOT / f.file_path
-    if not local_path.is_file():
-        raise HTTPException(
-            status_code=404,
-            detail="文件不在服务器归档目录中，可能已被移动或删除，请联系管理员检查本机 backend/data。",
+    # 单机/本机开发：文件实际在后端归档目录，但库中仍带 storage_computer_ip，优先读本地避免 8001 路径不一致导致 404→500
+    if local_path.is_file():
+        return FileResponse(local_path, filename=f.file_name)
+    if f.storage_computer_ip:
+        if proxy_file_from_client is None:
+            raise HTTPException(status_code=404, detail="文件不存在")
+        owner = db.query(User).filter(User.id == f.owner_user_id).first()
+        port = owner.file_service_port if owner and owner.file_service_port else 8001
+        resp = proxy_file_from_client(
+            f.storage_computer_ip,
+            port,
+            f.file_path,
+            f.file_name,
         )
-    return FileResponse(local_path, filename=f.file_name)
+        return StreamingResponse(resp.iter_content(8192), media_type="application/octet-stream")
+    raise HTTPException(status_code=404, detail="文件不存在")
 
 
 def _parse_form_bool(v) -> bool:
@@ -578,8 +656,7 @@ async def upload_file(
         is_contract=is_contract_val,
         print_mode=print_mode,
         owner_user_id=current_user.id,
-        storage_computer_ip="",
-        storage_computer_name="",
+        storage_computer_ip=current_user.computer_ip or "",
         storage_path=str(full_path),
     )
     db.add(f)

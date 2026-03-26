@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import auth, users, templates, projects, procurements, clients, files, ledger, ws
-from app.config import REPO_ROOT, get_static_dist_dir
+from app.config import REPO_ROOT, get_static_dist_dir, SINGLE_USER_MODE
 from app.database import run_migrations
 
 run_migrations()
@@ -48,7 +48,8 @@ app.include_router(users.router)
 app.include_router(templates.router)
 app.include_router(projects.router)
 app.include_router(procurements.router)
-app.include_router(clients.router)
+if not SINGLE_USER_MODE:
+    app.include_router(clients.router)
 app.include_router(files.router)
 app.include_router(ledger.router)
 app.include_router(ws.router)

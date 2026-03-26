@@ -47,6 +47,41 @@
       "dependsOrder": "parallel",
       "problemMatcher": [],
       "detail": "并行打开两个终端面板，分别跑后端与前端"
+    },
+    {
+      "label": "[Package] build_release (前端打包 + 同步 web/dist)",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/build_release.bat",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated",
+        "showReuseMessage": false
+      },
+      "problemMatcher": [],
+      "detail": "npm build:pack 并 robocopy 到 backend/web/dist（需本机 Node）"
+    },
+    {
+      "label": "[Desktop] 本机服务 :18080 (API+网页)",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/start.bat",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated",
+        "showReuseMessage": false,
+        "group": "shanhai-desktop"
+      },
+      "problemMatcher": [],
+      "detail": "封装版启动：start.bat 默认 18080（SHANHAI_PORT 可改），需 backend/venv"
     }
   ]
 }

@@ -102,3 +102,7 @@ API_V1_PREFIX = "/api"
 
 # Client agent (for distributed file storage)
 CLIENT_API_KEY = os.getenv("CLIENT_API_KEY", "your-secret-api-key")
+
+# Single-user workstation mode:
+# 默认开启，系统按单人工作台运行，弱化多人协作分支（用户管理/客户端注册/在线状态等）。
+SINGLE_USER_MODE = os.getenv("SINGLE_USER_MODE", "true").strip().lower() in ("1", "true", "yes", "on")

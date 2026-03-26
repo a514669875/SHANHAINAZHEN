@@ -1,18 +1,11 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
-import { useUserStore } from '@/store/user'
 
 const routes: RouteRecordRaw[] = [
   {
-    path: '/login',
-    name: 'Login',
-    component: () => import('@/views/login/LoginView.vue'),
-    meta: { requiresAuth: false },
-  },
-  {
     path: '/',
     component: () => import('@/layouts/MainLayout.vue'),
-    meta: { requiresAuth: true },
+    meta: { requiresAuth: false },
     children: [
       {
         path: '',
@@ -57,13 +50,6 @@ const router = createRouter({
   routes,
 })
 
-router.beforeEach(async (to, _from, next) => {
-  const userStore = useUserStore()
-  if (to.meta.requiresAuth !== false && !userStore.token) {
-    next({ name: 'Login', query: { redirect: to.fullPath } })
-  } else {
-    next()
-  }
-})
+router.beforeEach(async (_to, _from, next) => next())
 
 export default router

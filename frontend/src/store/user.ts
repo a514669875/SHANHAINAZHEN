@@ -15,23 +15,21 @@ export const useUserStore = defineStore('user', () => {
   }
 
   async function fetchUser() {
-    if (!token.value) return
     try {
       const u = await getMe()
       if (!u) {
-        logout()
+        user.value = null
         return
       }
       user.value = u
     } catch {
-      logout()
+      user.value = null
     }
   }
 
   function logout() {
-    token.value = null
+    // 单人工作台：不再使用登录会话，仅清理本地缓存态。
     user.value = null
-    localStorage.removeItem('token')
   }
 
   return { token, user, login, logout, fetchUser }

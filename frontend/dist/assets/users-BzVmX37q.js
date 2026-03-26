@@ -1,1 +1,0 @@
-import{v as r}from"./index-Bk5aM39j.js";function u(){return r.get("/users")}function n(e){return r.post("/users",e)}function o(e,s){return r.put(`/users/${e}`,s)}function a(e){return r.delete(`/users/${e}`)}export{n as c,a as d,u as l,o as u};

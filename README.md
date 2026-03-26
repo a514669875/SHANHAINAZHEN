@@ -8,7 +8,7 @@
 ShanHaiNaZhen_system/
 ├── backend/          # FastAPI 后端（可选 web/dist 存放打包后的静态前端）
 ├── frontend/         # Vue 3 前端
-├── scripts/          # 部署脚本（含封装构建与 start_production）
+├── scripts/          # 部署脚本（build_release.bat / start.bat）
 ├── VERSION.txt       # 发版版本号（首行，供后端读取）
 └── PRDs/             # 产品需求文档
 ```
@@ -43,13 +43,14 @@ venv\Scripts\activate
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-若已构建前端（存在 `frontend/dist` 或 `backend/web/dist` 且含 `index.html`），**同一端口 8000** 会同时提供 **网页 + API**，可直接访问 `http://127.0.0.1:8000` 而无需再开 Vite。
+若已构建前端（存在 `frontend/dist` 或 `backend/web/dist` 且含 `index.html`），**同一端口** 会同时提供 **网页 + API**；开发时常用 **8000**，封装一键启动默认 **18080**（见下）。
 
 #### 封装 / 生产（办公室单机）
 
-1. 构建静态资源：`scripts\build_package_assets.bat`（使用 `npm run build:pack`，避免部分环境下 `vue-tsc` 异常）
-2. （推荐）同步到后端侧目录：`scripts\sync_dist_to_backend_web.bat`
-3. 启动：`scripts\start_production.bat`（监听 `0.0.0.0:8000`，局域网可访问）
+1. **一键构建网页并同步到后端**：`scripts\build_release.bat`（`npm run build:pack` + 镜像到 `backend\web\dist`）
+2. **启动**：`scripts\start.bat`（监听 `0.0.0.0`，默认端口 **18080**，网页与 API 同端口；**8000 常被占用**，故单机封装改用该默认）  
+   - 改用其他端口：启动前执行 `set SHANHAI_PORT=8000`（或与 `stop.bat` 使用同一变量，便于结束进程）  
+   - 兼容旧习惯：仍可双击 `scripts\start_production.bat`（内部转调 `start.bat`）
 
 完整步骤、升级与备份见 **[docs/deploy-packaged.md](docs/deploy-packaged.md)**。给非开发人员看的简明步骤见 **[docs/小白操作说明.md](docs/小白操作说明.md)**。
 
@@ -66,7 +67,7 @@ npm run dev
 #### 在 Cursor / VS Code 里启动（推荐）
 
 - **`Ctrl+Shift+P`** → 输入 **`Tasks: Run Task`**（或菜单 **终端 → 运行任务…**），选择：
-  - **`[Backend] FastAPI :8000`** — 后端
+  - **`[Backend] FastAPI :8000`** — 后端（与 Vite 代理一致；封装单机请用 `start.bat` 默认 **18080**）
   - **`[Frontend] Vite :5173`** — 前端
   - **`[Full] 同时启动前后端`** — 一次开两个终端
 - 通过任务打开的终端，标签会显示 **任务名**（不再全是 `cmd`）。本仓库 `.vscode/settings.json` 已配置终端标题模板。
@@ -78,7 +79,7 @@ npm run dev
 
 - **元数据**：SQLite 数据库，默认在 **`backend/database/shanhai.db`**（可用环境变量 `SHANHAI_DATABASE_PATH` 覆盖）。
 - **流程 Word、目录、归档与上传文件**：均在 **`backend/data`**（`procurement_process`、`archived_file` 等，可用环境变量 `PROCUREMENT_PROCESS_ROOT` / `ARCHIVED_FILE_ROOT` 覆盖）。
-- 办公室部署：**一台电脑运行 `scripts\start_production.bat`（8000）**，其他人只用浏览器访问即可。
+- 办公室部署：**一台电脑运行 `scripts\start.bat`（默认 18080）**，其他人只用浏览器访问即可。
 
 ### 5. 数据备份
 
@@ -88,7 +89,7 @@ python scripts/backup.py
 
 ## 权限说明（导出）
 
-- **导出 Excel**（工程项目清单、智能台账）：**任意已登录用户**（系统管理员、采购管理员均可）均可调用对应接口；仅需有效登录 token。
+- **导出 Excel**（工程项目清单、智能台账）：单机模式下由后端统一鉴权，浏览器访问封装端口（默认 **18080**）即可调用。
 - 采购清单页的「导出 EXCEL」为前端生成 CSV，不另走后端权限。
 
 ## 功能模块
@@ -97,13 +98,13 @@ python scripts/backup.py
 - **采购流程**：四步式表单、Word生成、五选二、补充协议
 - **归档管理**：文件上传、合同标识、台账关联
 - **智能台账**：自动生成、导出Excel、主合同补充协议关联
-- **系统设置**：用户管理、Word模板（管理员）
+- **系统配置**：Word 模板路径等
 
 ## 技术栈
 
 - 前端：Vue 3 + Element Plus + Pinia + TypeScript + Vite
 - 后端：Python FastAPI + SQLAlchemy + SQLite
-- 文件存储：集中在运行后端的 **`backend/data`**（局域网浏览器访问 8000）
+- 文件存储：集中在运行后端的 **`backend/data`**（局域网浏览器访问封装端口，默认 **18080**）
 
 ## 测试与试运行
 

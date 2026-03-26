@@ -77,7 +77,8 @@ def num_to_cn(num: float) -> str:
 
 def _radio_option(selected: str, options: list[str], newline: bool = True) -> str:
     """单选按钮：显示全部选项，选中项[✓]未选中[ ]。newline=True 时分行显示。"""
-    sep = "\n " if newline else " "
+    # newline 仅换行，不添加前导空格，避免 Word 中第二行视觉缩进
+    sep = "\n" if newline else " "
     return sep.join(f"[✓]{o}" if o == selected else f"[  ]{o}" for o in options)
 
 

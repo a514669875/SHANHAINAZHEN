@@ -5,19 +5,6 @@
         <span class="logo">山海纳珍录</span>
         <span class="subtitle">山海纳万珍，一键录千文</span>
       </div>
-      <div class="nav-right">
-        <el-dropdown @command="handleCommand">
-          <span class="user-info">
-            {{ userStore.user?.real_name || userStore.user?.username }}
-            <el-icon><ArrowDown /></el-icon>
-          </span>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item command="logout">退出登录</el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
-      </div>
     </header>
     <div class="breadcrumb-bar">
       <el-breadcrumb separator="/">
@@ -59,9 +46,9 @@
             <el-icon><DataAnalysis /></el-icon>
             <span>智能台账</span>
           </el-menu-item>
-          <el-menu-item v-if="userStore.user?.role === '系统管理员'" index="/settings">
+          <el-menu-item index="/settings">
             <el-icon><Setting /></el-icon>
-            <span>系统设置</span>
+            <span>系统配置</span>
           </el-menu-item>
         </el-menu>
       </aside>
@@ -74,12 +61,11 @@
 
 <script setup lang="ts">
 import { computed, onMounted, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute } from 'vue-router'
 import { useUserStore } from '@/store/user'
 import { useBreadcrumbStore } from '@/store/breadcrumb'
 
 const route = useRoute()
-const router = useRouter()
 const userStore = useUserStore()
 const bc = useBreadcrumbStore()
 
@@ -142,18 +128,7 @@ const breadcrumbs = computed(() => {
 
 onMounted(async () => {
   await userStore.fetchUser()
-  // 本地有失效 token 时 /auth/me 返回 null，需退回登录页（路由守卫只判断 token 是否存在）
-  if (!userStore.token) {
-    await router.replace({ name: 'Login', query: { redirect: route.fullPath } })
-  }
 })
-
-function handleCommand(cmd: string) {
-  if (cmd === 'logout') {
-    userStore.logout()
-    router.push('/login')
-  }
-}
 </script>
 
 <style scoped lang="scss">
@@ -182,13 +157,6 @@ function handleCommand(cmd: string) {
     font-size: 18px;
     opacity: 0.9;
   }
-}
-.nav-right .user-info {
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  color: white;
 }
 .breadcrumb-bar {
   padding: 12px 24px;

@@ -1,6 +1,5 @@
 """Archive service - temp storage, folder creation, ledger generation on archive."""
 import json
-import re
 from pathlib import Path
 from sqlalchemy.orm import Session
 from app.models.project import Project
@@ -9,12 +8,7 @@ from app.models.file import File
 from app.models.ledger import Ledger
 from app.models.supplier import Supplier
 from app.config import ARCHIVED_FILE_ROOT
-from app.services.procurement_service import (
-    create_ledger_record,
-    sync_ledgers_on_procurement_update,
-    get_next_contract_seq,
-    generate_contract_number,
-)
+from app.services.procurement_service import create_ledger_record, sync_ledgers_on_procurement_update
 
 
 def _parse_form_data(form_data: str) -> dict:
@@ -75,159 +69,16 @@ def get_archive_contract_folder(project: Project, proc: Procurement, sibling: Pr
 
 
 def find_dual_sibling(db: Session, proc: Procurement) -> Procurement | None:
-    """Find the sibling procurement for 五选二 pair.
-
-    优先规则：
-    1) 反向标段 + 合同号序号相邻（材X/设备X/机械X 的 X±1）
-    2) 反向标段 + 创建时间最接近
-    3) 任意候选 + 创建时间最接近（历史脏数据兜底）
-    """
+    """Find the sibling procurement for 五选二 pair. 兼容 is_dual_contract 或 procurement_method=五选二."""
     if proc.procurement_method != "五选二":
         return None
-
-    candidates = db.query(Procurement).filter(
+    # Find other procurement with same project, 五选二, different id
+    other = db.query(Procurement).filter(
         Procurement.project_id == proc.project_id,
         Procurement.procurement_method == "五选二",
         Procurement.id != proc.id,
-    ).all()
-    if not candidates:
-        return None
-
-    def _closest_by_create_time(rows: list[Procurement]) -> Procurement | None:
-        if not rows:
-            return None
-        p_ct = getattr(proc, "create_time", None)
-        if p_ct is None:
-            return min(rows, key=lambda x: abs((x.id or 0) - (proc.id or 0)))
-        scored = []
-        for r in rows:
-            r_ct = getattr(r, "create_time", None)
-            if r_ct is None:
-                score = float("inf")
-            else:
-                try:
-                    score = abs((r_ct - p_ct).total_seconds())
-                except Exception:
-                    score = float("inf")
-            scored.append((score, abs((r.id or 0) - (proc.id or 0)), r))
-        scored.sort(key=lambda t: (t[0], t[1]))
-        return scored[0][2]
-
-    def _contract_seq_info(contract_number: str | None) -> tuple[str, int] | None:
-        if not contract_number:
-            return None
-        m = re.match(r"^(.*?-)(材|设备|机械)(\d+)$", str(contract_number).strip())
-        if not m:
-            return None
-        stem = f"{m.group(1)}{m.group(2)}"
-        return stem, int(m.group(3))
-
-    opposite_section = None
-    if proc.contract_section == "一标段":
-        opposite_section = "二标段"
-    elif proc.contract_section == "二标段":
-        opposite_section = "一标段"
-
-    section_candidates = candidates
-    if opposite_section:
-        sec_filtered = [c for c in candidates if (c.contract_section or "") == opposite_section]
-        if sec_filtered:
-            section_candidates = sec_filtered
-
-    proc_seq = _contract_seq_info(getattr(proc, "contract_number", None))
-    if proc_seq and opposite_section:
-        stem, n = proc_seq
-        expect_n = n + 1 if proc.contract_section == "一标段" else n - 1
-        for c in section_candidates:
-            ci = _contract_seq_info(getattr(c, "contract_number", None))
-            if ci and ci[0] == stem and ci[1] == expect_n:
-                return c
-
-    return _closest_by_create_time(section_candidates) or _closest_by_create_time(candidates)
-
-
-def _parse_main_contract_seq(contract_number: str | None) -> int | None:
-    if not contract_number:
-        return None
-    m = re.match(r"^.*-(材|设备|机械)(\d+)$", str(contract_number).strip())
-    if not m:
-        return None
-    try:
-        return int(m.group(2))
-    except (TypeError, ValueError):
-        return None
-
-
-def _ensure_main_contract_number(db: Session, project: Project, proc: Procurement) -> None:
-    """主合同编号在首次归档时分配；避免创建采购时抢号。"""
-    if (proc.contract_number or "").strip():
-        return
-    seq = get_next_contract_seq(db, project.id, proc.procurement_type)
-    while True:
-        cn = generate_contract_number(project, proc.procurement_type, seq)
-        exists = db.query(Procurement).filter(
-            Procurement.project_id == project.id,
-            Procurement.contract_number == cn,
-            Procurement.id != proc.id,
-        ).first()
-        if not exists:
-            proc.contract_number = cn
-            return
-        seq += 1
-
-
-def _ensure_dual_contract_numbers(db: Session, project: Project, proc: Procurement, sibling: Procurement) -> None:
-    """五选二在归档时一次性分配连号（按一标段/二标段）。"""
-    first, second = (proc, sibling) if proc.contract_section == "一标段" else (sibling, proc)
-    first_has = bool((first.contract_number or "").strip())
-    second_has = bool((second.contract_number or "").strip())
-    if first_has and second_has:
-        return
-    if not first_has and not second_has:
-        seq = get_next_contract_seq(db, project.id, first.procurement_type)
-        first.contract_number = generate_contract_number(project, first.procurement_type, seq)
-        second.contract_number = generate_contract_number(project, second.procurement_type, seq + 1)
-        return
-    if first_has and not second_has:
-        s = _parse_main_contract_seq(first.contract_number)
-        if s is not None:
-            second.contract_number = generate_contract_number(project, second.procurement_type, s + 1)
-            return
-        _ensure_main_contract_number(db, project, second)
-        return
-    if second_has and not first_has:
-        s = _parse_main_contract_seq(second.contract_number)
-        if s is not None and s > 1:
-            first.contract_number = generate_contract_number(project, first.procurement_type, s - 1)
-            return
-        _ensure_main_contract_number(db, project, first)
-
-
-def _ensure_supplement_contract_number(db: Session, proc: Procurement) -> None:
-    """补充协议编号在归档时分配：主合同号-补X（按已有补充协议号递增，不回收）。"""
-    if (proc.contract_number or "").strip():
-        return
-    if not proc.parent_contract_id:
-        return
-    parent = db.query(Procurement).filter(Procurement.id == proc.parent_contract_id).first()
-    if not parent or not (parent.contract_number or "").strip():
-        return
-    base = f"{parent.contract_number}-补"
-    rows = db.query(Procurement).filter(
-        Procurement.parent_contract_id == proc.parent_contract_id,
-        Procurement.id != proc.id,
-        Procurement.contract_number.isnot(None),
-        Procurement.contract_number.like(f"{base}%"),
-    ).all()
-    max_seq = 0
-    for r in rows:
-        cn = (r.contract_number or "").strip()
-        if not cn.startswith(base):
-            continue
-        tail = cn[len(base):]
-        if tail.isdigit():
-            max_seq = max(max_seq, int(tail))
-    proc.contract_number = f"{base}{max_seq + 1}"
+    ).first()
+    return other
 
 
 def count_contract_files_in_temp(db: Session, procurement_ids: list[int]) -> int:
@@ -281,21 +132,6 @@ def try_archive_and_create_ledgers(
     count = count_contract_files_in_temp(db, proc_ids)
     if count < required:
         return False
-
-    # 合同编号在归档成功时分配（非创建采购时）
-    if is_dual and sibling:
-        _ensure_dual_contract_numbers(db, project, proc, sibling)
-    elif proc.procurement_method == "补充协议":
-        _ensure_supplement_contract_number(db, proc)
-    else:
-        _ensure_main_contract_number(db, project, proc)
-    if is_dual and sibling:
-        a, b = (proc, sibling) if proc.contract_section == "一标段" else (sibling, proc)
-        if not (a.contract_number or "").strip() or not (b.contract_number or "").strip():
-            return False
-    else:
-        if not (proc.contract_number or "").strip():
-            return False
 
     # Build archive folder path
     archive_base = f"{project.project_id}材料（设备）合同"
