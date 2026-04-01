@@ -56,6 +56,20 @@ def _event_matches_subscriber(event: RealtimeEvent, sub: Subscriber) -> bool:
         ):
             return True
 
+    # 智能台账页：采购/工程/台账变更后需重拉列表（非缓存问题，仅减少界面滞后）
+    if sub.context.scope == "ledger":
+        if evt in (
+            EventType.PROCUREMENT_CREATED,
+            EventType.PROCUREMENT_UPDATED,
+            EventType.PROCUREMENT_DELETED,
+            EventType.PROJECT_CREATED,
+            EventType.PROJECT_UPDATED,
+            EventType.PROJECT_DELETED,
+            EventType.LEDGER_CREATED,
+            EventType.LEDGER_UPDATED,
+        ):
+            return True
+
     # 项目级
     if evt in (EventType.PROJECT_CREATED, EventType.PROJECT_UPDATED, EventType.PROJECT_DELETED):
         if sub.context.project_id is not None and pj is not None:

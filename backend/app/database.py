@@ -65,16 +65,6 @@ def run_migrations():
             conn.commit()
     except Exception:
         pass
-    # 清理历史孤儿状态（旧版本未开启外键级联时遗留）
-    try:
-        with engine.connect() as conn:
-            conn.execute(text(
-                "DELETE FROM t_process_file_sync_status "
-                "WHERE procurement_id NOT IN (SELECT id FROM t_procurement)"
-            ))
-            conn.commit()
-    except Exception:
-        pass
     for stmt in [
         "ALTER TABLE t_project ADD COLUMN construction_contact_person VARCHAR(100)",
         "ALTER TABLE t_project ADD COLUMN construction_contact_phone VARCHAR(100)",
@@ -88,6 +78,13 @@ def run_migrations():
                 conn.commit()
         except Exception:
             pass
+    # 台账/文件/供应商/流程同步：采购或工程已删仍残留的行（启动时自动清扫）
+    try:
+        from app.services.orphan_cleanup import run_orphan_cleanup
+
+        run_orphan_cleanup(engine)
+    except Exception:
+        pass
 
 
 def get_db():

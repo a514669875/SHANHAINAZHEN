@@ -107,7 +107,8 @@ def list_ledger(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    q = db.query(Ledger)
+    # 仅展示仍有关联采购的台账，避免采购已删而 t_ledger 残留时列表与删除工程逻辑不一致
+    q = db.query(Ledger).join(Procurement, Ledger.procurement_id == Procurement.id)
     if keyword:
         q = q.filter(
             Ledger.contract_number.contains(keyword)

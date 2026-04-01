@@ -1,5 +1,4 @@
 """Procurement API."""
-import shutil
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -15,7 +14,7 @@ from app.models.supplier import Supplier
 from app.models.ledger import Ledger
 from app.core.auth import get_current_user
 from app.schemas.procurement import ProcurementCreate, ProcurementUpdate
-from app.services.project_service import is_officer
+from app.services.project_service import is_officer, _safe_rmtree
 from app.services.archive_service import get_archive_contract_folder
 from app.services.procurement_service import (
     get_next_contract_seq,
@@ -1235,11 +1234,10 @@ def delete_procurement(
         if folder_name:
             archive_base = ARCHIVED_FILE_ROOT / f"{project.project_id}材料（设备）合同"
             archive_path = archive_base / folder_name
-            if archive_path.exists():
-                try:
-                    shutil.rmtree(archive_path)
-                except Exception as e:
-                    logger.warning("五选二归档文件夹删除失败: %s", e)
+            try:
+                _safe_rmtree(archive_path)
+            except Exception as e:
+                logger.warning("五选二归档文件夹删除失败: %s", e)
     warnings = []
     for p in to_delete:
         try:

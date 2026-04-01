@@ -1,9 +1,26 @@
 """Project service - folder creation logic per PRD 3.1.3."""
+import os
 import shutil
+import stat
 from pathlib import Path
 from sqlalchemy.orm import Session
 from app.config import PROCUREMENT_PROCESS_ROOT, ARCHIVED_FILE_ROOT, SINGLE_USER_MODE
 from app.models.project import Project
+
+
+def _safe_rmtree(path: Path) -> None:
+    """删除目录树；路径不存在则跳过。Windows 下只读/占用时尝试改权限后重试。"""
+    if not path.exists():
+        return
+
+    def _onerror(func, p, _exc_info):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception:
+            pass
+
+    shutil.rmtree(path, onerror=_onerror)
 
 
 def delete_project_folders(project: Project) -> None:
@@ -12,10 +29,8 @@ def delete_project_folders(project: Project) -> None:
     process_path = PROCUREMENT_PROCESS_ROOT / process_folder_name
     archive_folder_name = f"{project.project_id}材料（设备）合同"
     archive_path = ARCHIVED_FILE_ROOT / archive_folder_name
-    if process_path.exists():
-        shutil.rmtree(process_path)
-    if archive_path.exists():
-        shutil.rmtree(archive_path)
+    _safe_rmtree(process_path)
+    _safe_rmtree(archive_path)
 
 
 def is_officer(project: Project, user_id: int) -> bool:

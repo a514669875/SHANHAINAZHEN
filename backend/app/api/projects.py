@@ -15,6 +15,7 @@ from app.utils.officer import resolve_officer_names
 from app.models.user import User
 from app.models.project import Project
 from app.models.procurement import Procurement
+from app.models.ledger import Ledger
 from app.core.auth import get_current_user, get_authenticated_user
 from app.schemas.project import ProjectCreate, ProjectUpdate, ProjectResponse
 from app.services.project_service import is_officer, create_project_folders, delete_project_folders, rename_project_folders
@@ -238,6 +239,10 @@ def delete_project(
             status_code=400,
             detail=f"无法删除：该工程项目下仍有 {proc_count} 个采购项目，请先删除全部采购项目后再删除工程。",
         )
+    # 历史数据：采购已删但台账未删（例如旧逻辑在磁盘删除失败时跳过了台账删除）
+    n_ledger = db.query(Ledger).filter(Ledger.project_id == project.id).delete(synchronize_session=False)
+    if n_ledger:
+        logger.info("删除工程前清理残留台账 project_id=%s rows=%s", project.id, n_ledger)
     try:
         delete_project_folders(project)
     except Exception as e:

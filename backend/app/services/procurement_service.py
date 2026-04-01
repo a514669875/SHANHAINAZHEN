@@ -1,5 +1,7 @@
 """Procurement service - contract number, ledger, folder creation."""
+import os
 import shutil
+import stat
 from datetime import datetime
 from typing import Optional
 from sqlalchemy.orm import Session
@@ -10,6 +12,7 @@ from app.models.ledger import Ledger
 from app.models.supplier import Supplier
 from app.models.file import File
 from app.config import PROCUREMENT_PROCESS_ROOT, ARCHIVED_FILE_ROOT
+from app.services.project_service import _safe_rmtree
 from pathlib import Path
 
 # 合同编号规则：材料采购/材料租赁 共用 材X 序号池；设备采购 设备X；机械租赁 机械X（PRD 8.3）
@@ -232,6 +235,20 @@ def create_procurement_folder(project: Project, procurement: Procurement, conten
 
 def delete_procurement_resources(db: Session, project: Project, procurement: Procurement) -> None:
     """Delete procurement folders, physical files, ledgers per PRD 4.3."""
+    # 先处理 DB：磁盘操作可能抛错；若此前把台账删留到最后，会导致采购已删而台账残留。
+    # 4. If this is a supplement, remove it from parent ledger's supplement_contracts (PRD 8.11)
+    if procurement.parent_contract_id and procurement.contract_number:
+        parent_ledger = db.query(Ledger).filter(
+            Ledger.procurement_id == procurement.parent_contract_id,
+        ).first()
+        if parent_ledger and parent_ledger.supplement_contracts:
+            lines = [x.strip() for x in parent_ledger.supplement_contracts.split("\n") if x.strip()]
+            lines = [x for x in lines if x != procurement.contract_number.strip()]
+            parent_ledger.supplement_contracts = "\n".join(lines) if lines else ""
+
+    # 5. Delete ledgers for this procurement (before rmtree/unlink)
+    db.query(Ledger).filter(Ledger.procurement_id == procurement.id).delete(synchronize_session=False)
+
     # 1. Delete process folder (采购项目专属文件夹 / 补充协议专属文件夹)
     base_process = PROCUREMENT_PROCESS_ROOT / f"{project.project_id} {project.project_name}"
     if procurement.parent_contract_id and procurement.contract_number and "-补" in procurement.contract_number:
@@ -245,37 +262,42 @@ def delete_procurement_resources(db: Session, project: Project, procurement: Pro
             else:
                 folder_name = f"{project.project_id}-{content_safe}-补{supp_seq}"
             process_folder = base_process / folder_name
-            if process_folder.exists():
-                shutil.rmtree(process_folder)
+            _safe_rmtree(process_folder)
     else:
         # 暂存草稿：工程编号-草稿X（X 从 1 递增），通过 .procurement_id 标记定位（PRD 8.15）
         if procurement.is_draft or (procurement.contract_number or "") == "草稿":
             draft_folder = _find_draft_folder_for_procurement(project, procurement.id)
-            if draft_folder and draft_folder.exists():
-                shutil.rmtree(draft_folder)
+            if draft_folder:
+                _safe_rmtree(draft_folder)
         else:
             process_folder = _find_process_folder_by_procurement_id(project, procurement.id)
             if process_folder is None:
                 content = (procurement.content or procurement.project_name or "").strip()
                 folder_name = f"{project.project_id}-{content}" if content else f"{project.project_id}-{procurement.project_name}"
                 process_folder = base_process / folder_name
-            if process_folder.exists():
-                shutil.rmtree(process_folder)
+            _safe_rmtree(process_folder)
 
     # 2. Delete physical files from disk
     files = db.query(File).filter(File.procurement_id == procurement.id).all()
     for f in files:
         full_path = ARCHIVED_FILE_ROOT / f.file_path
-        if full_path.exists():
+        if not full_path.exists():
+            continue
+        try:
             full_path.unlink()
+        except OSError:
+            try:
+                os.chmod(full_path, stat.S_IWRITE)
+                full_path.unlink()
+            except OSError:
+                pass
 
     # 3. Delete archive subfolder if it's only for this procurement (常规/补充协议)
     archive_base = ARCHIVED_FILE_ROOT / f"{project.project_id}材料（设备）合同"
     is_dual = procurement.is_dual_contract or procurement.procurement_method == "五选二"
     if not is_dual and procurement.contract_number:
         archive_sub = archive_base / procurement.contract_number
-        if archive_sub.exists():
-            shutil.rmtree(archive_sub)
+        _safe_rmtree(archive_sub)
     elif is_dual:
         from app.services.archive_service import find_dual_sibling
         sibling = find_dual_sibling(db, procurement)
@@ -290,24 +312,10 @@ def delete_procurement_resources(db: Session, project: Project, procurement: Pro
                         if not archive_sub.exists():
                             contract_folder = f"{project.project_id}-{code}{num - 1}、{suffix}"
                             archive_sub = archive_base / contract_folder
-                        if archive_sub.exists():
-                            shutil.rmtree(archive_sub)
+                        _safe_rmtree(archive_sub)
                     except (ValueError, IndexError):
                         pass
                     break
-
-    # 4. If this is a supplement, remove it from parent ledger's supplement_contracts (PRD 8.11)
-    if procurement.parent_contract_id and procurement.contract_number:
-        parent_ledger = db.query(Ledger).filter(
-            Ledger.procurement_id == procurement.parent_contract_id,
-        ).first()
-        if parent_ledger and parent_ledger.supplement_contracts:
-            lines = [x.strip() for x in parent_ledger.supplement_contracts.split("\n") if x.strip()]
-            lines = [x for x in lines if x != procurement.contract_number.strip()]
-            parent_ledger.supplement_contracts = "\n".join(lines) if lines else ""
-
-    # 5. Delete ledgers for this procurement
-    db.query(Ledger).filter(Ledger.procurement_id == procurement.id).delete()
 
 
 def sync_ledgers_on_project_update(

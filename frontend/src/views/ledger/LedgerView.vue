@@ -138,8 +138,27 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { listLedger, exportLedgerExcel, importLedgerExcel } from '@/api/ledger'
 import { formatDateYMD, formatNumericLocale, formatContractPrice } from '@/utils/format'
+import { useRealtimeSync, EventType } from '@/composables/useRealtimeSync'
 
 const router = useRouter()
+
+const _ledgerRefreshTypes = new Set<string>([
+  EventType.PROCUREMENT_CREATED,
+  EventType.PROCUREMENT_UPDATED,
+  EventType.PROCUREMENT_DELETED,
+  EventType.PROJECT_CREATED,
+  EventType.PROJECT_UPDATED,
+  EventType.PROJECT_DELETED,
+  EventType.LEDGER_CREATED,
+  EventType.LEDGER_UPDATED,
+])
+
+useRealtimeSync({
+  context: { scope: 'ledger' },
+  onEvent: (e) => {
+    if (_ledgerRefreshTypes.has(e.type)) loadData()
+  },
+})
 
 const tableData = ref<any[]>([])
 const total = ref(0)

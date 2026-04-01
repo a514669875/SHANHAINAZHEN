@@ -48,6 +48,7 @@ export type SubscribeScope =
   | 'procurement_list'
   | 'procurement_detail'
   | 'archive'
+  | 'ledger'
   | 'admin'
 
 export interface SubscribeContext {
